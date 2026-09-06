@@ -1087,27 +1087,48 @@ module GSC
 
       key_file = nil
 
-      # 1. Check ~/Downloads for recent Google Cloud keys
-      downloads_dir = File.expand_path('~/Downloads')
-      if Dir.exist?(downloads_dir)
-        recent_keys = Dir.glob(File.join(downloads_dir, '*.json')).select do |f|
-          next false if File.size(f) > 50_000 # Service account keys are ~2KB
-          content = File.read(f) rescue ""
-          content.include?('"client_email"') && content.include?('"private_key"')
-        end.sort_by { |f| File.mtime(f) rescue Time.at(0) }.reverse
+      # 0. Check if a key is already configured
+      existing_key = Auth.find_key(nil)
+      if existing_key && File.exist?(existing_key)
+        sa = JSON.parse(File.read(existing_key)) rescue {}
+        if sa['client_email']
+          puts "🔑 Found existing key already configured:"
+          puts "   #{Color.c(existing_key, Color::CYAN)} (#{sa['client_email']})"
+          print "Keep and test this key? [Y/n]: "
+          choice = $stdin.gets&.strip
+          if choice.nil? || choice.empty? || choice.downcase == 'y'
+            key_file = existing_key
+          end
+        end
+      end
 
-        if recent_keys.any?
-          latest = recent_keys.first
-          sa = JSON.parse(File.read(latest)) rescue {}
-          if sa['client_email']
-            puts "🔍 Found recently downloaded service account key in Downloads:"
-            puts "   #{Color.c(File.basename(latest), Color::CYAN)} (#{sa['client_email']})"
-            print "Use this key? [Y/n]: "
-            choice = $stdin.gets&.strip
-            if choice.nil? || choice.empty? || choice.downcase == 'y'
-              key_file = latest
+      # 1. Check ~/Downloads for recent Google Cloud keys (if permitted by OS)
+      unless key_file
+        begin
+          downloads_dir = File.expand_path('~/Downloads')
+          if Dir.exist?(downloads_dir)
+            recent_keys = Dir.glob(File.join(downloads_dir, '*.json')).select do |f|
+              next false if (File.size(f) rescue 999_999) > 50_000 # Service account keys are ~2KB
+              content = File.read(f) rescue ""
+              content.include?('"client_email"') && content.include?('"private_key"')
+            end.sort_by { |f| File.mtime(f) rescue Time.at(0) }.reverse
+
+            if recent_keys.any?
+              latest = recent_keys.first
+              sa = JSON.parse(File.read(latest)) rescue {}
+              if sa['client_email']
+                puts "🔍 Found recently downloaded service account key in Downloads:"
+                puts "   #{Color.c(File.basename(latest), Color::CYAN)} (#{sa['client_email']})"
+                print "Use this key? [Y/n]: "
+                choice = $stdin.gets&.strip
+                if choice.nil? || choice.empty? || choice.downcase == 'y'
+                  key_file = latest
+                end
+              end
             end
           end
+        rescue Errno::EPERM, StandardError
+          # Permission to ~/Downloads restricted by macOS TCC - fallback gracefully to drag & drop
         end
       end
 
@@ -1146,9 +1167,9 @@ module GSC
       # 4. Save to ~/.config/gsc/service-account.json
       dest = File.join(Config::CONFIG_DIR, 'service-account.json')
       FileUtils.mkdir_p(Config::CONFIG_DIR)
-      FileUtils.cp(key_file, dest)
+      FileUtils.cp(key_file, dest) unless File.expand_path(key_file) == File.expand_path(dest)
       Config.set_key_path(dest)
-      puts Color.c("\n✅ Successfully saved key to: #{dest}", Color::GREEN, Color::BOLD)
+      puts Color.c("\n✅ Key configured at: #{dest}", Color::GREEN, Color::BOLD)
       puts "   Service Account: #{Color.c(sa['client_email'], Color::CYAN)}"
 
       # 5. Live test connection
