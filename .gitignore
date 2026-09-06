@@ -1,0 +1,17 @@
+# Google service account keys (CRITICAL: never commit credentials)
+*service-account*.json
+*credentials*.json
+*.key
+
+# Exports and data
+*.csv
+data/
+
+# OS artifacts
+.DS_Store
+Thumbs.db
+
+# Logs & temp
+*.log
+tmp/
+scratch/

@@ -1,0 +1,1716 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+# ==============================================================================
+# Google Search Console & Indexing API CLI Tool (Pure Ruby - Zero Gem Dependencies)
+# ==============================================================================
+#
+# A lightweight, standalone Ruby utility for interacting with Google Search Console
+# and the Google Indexing API using only the Ruby standard library (Net::HTTP, OpenSSL, JSON).
+#
+# Features:
+#   - Instant URL Indexing & Deletion notifications (Google Indexing API)
+#   - Live Search Console URL Inspection (coverage, canonical, crawl date)
+#   - Search Analytics (top queries, top pages, CTR, average position)
+#   - Bulk XML Sitemap parsing and automated batch indexing
+#   - Sitemap management and domain verification checks
+#   - Multi-property support with Service Account JWT authentication
+#   - Global Environment: Persistent active domain ('gsc use <dom>') & config inspection ('gsc where')
+#   - 1-Click Interactive Setup: 'gsc connect' auto-detects or drag-and-drops your downloaded key
+#   - AI Agent Native: Machine-readable JSON output mode ('--json' / '-j') across all commands
+#
+# ==============================================================================
+# SETUP GUIDE (How to get your Service Account JSON Key):
+# ==============================================================================
+#
+# STEP 1: Google Cloud Console Setup
+#   1. Go to Google Cloud Console: https://console.cloud.google.com/
+#   2. Create a new project (or select an existing one).
+#   3. Go to "APIs & Services" > "Library" and enable both:
+#      - "Web Search Indexing API"
+#      - "Google Search Console API"
+#   4. Go to "IAM & Admin" > "Service Accounts":
+#      - Click "+ CREATE SERVICE ACCOUNT" (e.g. name: "gsc-indexer").
+#      - Click "Done" (no Google Cloud IAM roles required).
+#      - Click your newly created service account > "Keys" tab > "ADD KEY" > "Create new key".
+#      - Choose "JSON" and download the file.
+#
+# STEP 2: Run 'gsc connect'
+#   Run 'gsc connect' in your terminal! It will auto-detect the file in your Downloads
+#   folder (or let you drag & drop it) and set everything up automatically!
+#
+# STEP 3: Google Search Console Setup
+#   1. Copy the service account email (e.g. gsc-indexer@your-project.iam.gserviceaccount.com).
+#   2. Go to Google Search Console: https://search.google.com/search-console/
+#   3. Select your domain property (e.g. sc-domain:example.com or URL-prefix).
+#   4. Go to "Settings" > "Users and permissions".
+#   5. Click "Add user":
+#      - Email address: Paste your service account email.
+#      - Permission: Set to "Owner" (Required for Indexing API and URL Inspection).
+#      - Click "Add".
+#
+# ==============================================================================
+# CLI USAGE:
+# ==============================================================================
+#   gsc skills [install|show]            - Inspect, install, or export the AI Agent Skill
+#   gsc connect                          - Interactive setup: auto-detects key or drag & drop
+#   gsc open                             - Reveal configuration directory in Finder
+#   gsc use <domain>                     - Set default active domain (saved to ~/.config/gsc/config.json)
+#   gsc where                            - Show installation location, active key, and config paths
+#   gsc config                           - View or edit active configuration
+#   gsc domains                          - List verified domains (highlights currently active domain)
+#   gsc index <url>                      - Notify Googlebot to crawl/index a URL
+#   gsc remove <url>                     - Notify Googlebot a URL has been deleted
+#   gsc status <url>                     - Check Indexing API notification metadata
+#   gsc index-sitemap [sitemapUrlOrPath] - Bulk submit sitemap URLs for fast indexing
+#   gsc inspect <url> [-d <domain>]      - Live Search Console inspection
+#   gsc inspect-sitemap [sitemap]        - Bulk inspect sitemap URLs & report health
+#   gsc top-pages [--days 30]            - Top indexed pages driving impressions/clicks
+#   gsc top-queries [--days 30]          - Top search queries, CTR, and average position
+#   gsc performance [--days 30]          - Aggregated Search Console performance summary
+#   gsc sitemaps-list [-d <domain>]      - List registered sitemaps in Search Console
+#   gsc sitemaps-submit <sitemapUrl>     - Register / submit an XML sitemap to GSC
+#   gsc audit [-d <domain>]              - Run automated 4-step SEO & indexing check
+#
+# Options:
+#   -d, --domain <domain>   Target domain (overrides current default domain)
+#   -k, --key <path>        Path to Google Service Account JSON key
+#   -j, --json              Output machine-readable JSON (ideal for AI agents & programmatic use)
+#       --days <n>          Time window in days for search analytics (default: 30)
+#       --limit <n>         Max rows to display (default: 50)
+#       --csv <path>        Export analytics or inspection results to a CSV file
+#       --delay <ms>        Delay between sequential API requests in ms (default: 120ms)
+#       --dry-run           Simulate execution without sending API mutations
+#   -h, --help              Show help banner and options
+#
+# ==============================================================================
+
+require 'net/http'
+require 'uri'
+require 'json'
+require 'openssl'
+require 'base64'
+require 'optparse'
+require 'time'
+require 'date'
+require 'fileutils'
+
+module GSC
+  # Terminal Color & Styling Utilities
+  module Color
+    RESET     = "\e[0m"
+    BOLD      = "\e[1m"
+    DIM       = "\e[2m"
+    UNDERLINE = "\e[4m"
+    RED       = "\e[31m"
+    GREEN     = "\e[32m"
+    YELLOW    = "\e[33m"
+    BLUE      = "\e[34m"
+    MAGENTA   = "\e[35m"
+    CYAN      = "\e[36m"
+    WHITE     = "\e[37m"
+    GRAY      = "\e[90m"
+
+    def self.c(text, *styles)
+      "#{styles.join}#{text}#{RESET}"
+    end
+  end
+
+  # Persistent Configuration Manager (~/.config/gsc/config.json)
+  class Config
+    CONFIG_DIR  = File.expand_path('~/.config/gsc')
+    CONFIG_FILE = File.join(CONFIG_DIR, 'config.json')
+
+    def self.load
+      return {} unless File.exist?(CONFIG_FILE)
+      JSON.parse(File.read(CONFIG_FILE))
+    rescue StandardError
+      {}
+    end
+
+    def self.save(data)
+      FileUtils.mkdir_p(CONFIG_DIR)
+      existing = load
+      updated = existing.merge(data)
+      File.write(CONFIG_FILE, JSON.pretty_generate(updated))
+      updated
+    end
+
+    def self.default_domain
+      load['default_domain']
+    end
+
+    def self.set_default_domain(domain)
+      clean = domain.to_s.sub(%r{^https?://}, '').sub(/^sc-domain:/, '').chomp('/')
+      save('default_domain' => clean)
+      clean
+    end
+
+    def self.key_path
+      load['key_path']
+    end
+
+    def self.set_key_path(path)
+      resolved = File.expand_path(path)
+      save('key_path' => resolved)
+      resolved
+    end
+  end
+
+  # OAuth2 JWT Token Generator using pure OpenSSL (No external JWT gem needed)
+  class Auth
+    OAUTH_TOKEN_URI = URI('https://oauth2.googleapis.com/token')
+
+    SCOPES = [
+      'https://www.googleapis.com/auth/indexing',
+      'https://www.googleapis.com/auth/webmasters',
+      'https://www.googleapis.com/auth/webmasters.readonly'
+    ].freeze
+
+    def self.find_key(custom_path = nil)
+      candidates = [
+        custom_path,
+        Config.key_path,
+        ENV['GSC_KEY_PATH'],
+        ENV['GOOGLE_APPLICATION_CREDENTIALS'],
+        File.expand_path('gsc-service-account.json', Dir.pwd),
+        File.expand_path('service-account.json', Dir.pwd),
+        File.expand_path('config/gsc-service-account.json', Dir.pwd),
+        File.expand_path('config/service-account.json', Dir.pwd),
+        File.expand_path('../gsc-service-account.json', Dir.pwd),
+        File.expand_path('../service-account.json', Dir.pwd),
+        File.expand_path('~/.config/gsc/service-account.json'),
+        File.expand_path('~/.gsc-service-account.json')
+      ].compact
+
+      candidates.find do |path|
+        next false unless File.file?(path)
+
+        begin
+          json = JSON.parse(File.read(path))
+          json['client_email'] && json['private_key']
+        rescue StandardError
+          false
+        end
+      end
+    end
+
+    def self.fetch_access_token(service_account)
+      now = Time.now.to_i
+      header = { alg: 'RS256', typ: 'JWT' }
+      claims = {
+        iss: service_account['client_email'],
+        scope: SCOPES.join(' '),
+        aud: OAUTH_TOKEN_URI.to_s,
+        exp: now + 3600,
+        iat: now
+      }
+
+      encoded_header = base64_url_encode(JSON.generate(header))
+      encoded_claims = base64_url_encode(JSON.generate(claims))
+      unsigned_jwt   = "#{encoded_header}.#{encoded_claims}"
+
+      private_key = OpenSSL::PKey::RSA.new(service_account['private_key'])
+      signature   = private_key.sign(OpenSSL::Digest::SHA256.new, unsigned_jwt)
+      encoded_sig = base64_url_encode(signature)
+      signed_jwt  = "#{unsigned_jwt}.#{encoded_sig}"
+
+      res = Net::HTTP.post_form(
+        OAUTH_TOKEN_URI,
+        'grant_type' => 'urn:ietf:params:oauth:grant-type:jwt-bearer',
+        'assertion'  => signed_jwt
+      )
+
+      data = JSON.parse(res.body)
+      unless res.is_a?(Net::HTTPSuccess)
+        error_msg = data['error_description'] || data['error'] || res.body
+        raise "OAuth token request failed: #{error_msg}"
+      end
+
+      data['access_token']
+    end
+
+    def self.base64_url_encode(str)
+      Base64.urlsafe_encode64(str).delete('=')
+    end
+  end
+
+  # HTTP Client wrapper with JSON serialization & Bearer Auth
+  class Client
+    def initialize(token:)
+      @token = token
+    end
+
+    def get(url)
+      uri = URI(url)
+      req = Net::HTTP::Get.new(uri)
+      req['Authorization'] = "Bearer #{@token}"
+      execute(uri, req)
+    end
+
+    def post(url, body)
+      uri = URI(url)
+      req = Net::HTTP::Post.new(uri)
+      req['Authorization'] = "Bearer #{@token}"
+      req['Content-Type'] = 'application/json'
+      req.body = JSON.generate(body)
+      execute(uri, req)
+    end
+
+    def put(url)
+      uri = URI(url)
+      req = Net::HTTP::Put.new(uri)
+      req['Authorization'] = "Bearer #{@token}"
+      execute(uri, req)
+    end
+
+    private
+
+    def execute(uri, req)
+      http = Net::HTTP.new(uri.host, uri.port)
+      http.use_ssl = (uri.scheme == 'https')
+      http.open_timeout = 10
+      http.read_timeout = 30
+
+      response = http.request(req)
+      body = response.body ? (JSON.parse(response.body) rescue response.body) : nil
+
+      {
+        ok: response.is_a?(Net::HTTPSuccess),
+        status: response.code.to_i,
+        data: body
+      }
+    rescue StandardError => e
+      {
+        ok: false,
+        status: 0,
+        data: { 'error' => { 'message' => e.message } }
+      }
+    end
+  end
+
+  # API Endpoints for Google Indexing & Search Console
+  class API
+    def initialize(client)
+      @client = client
+    end
+
+    # Indexing API: Publish URL (URL_UPDATED / URL_DELETED)
+    def publish_url(url, type = 'URL_UPDATED')
+      @client.post('https://indexing.googleapis.com/v3/urlNotifications:publish', { url: url, type: type })
+    end
+
+    # Indexing API: Metadata status
+    def get_url_status(url)
+      @client.get("https://indexing.googleapis.com/v3/urlNotifications/metadata?url=#{URI.encode_www_form_component(url)}")
+    end
+
+    # URL Inspection API
+    def inspect_url(inspection_url, site_url)
+      @client.post('https://searchconsole.googleapis.com/v1/urlInspection/index:inspect', {
+        inspectionUrl: inspection_url,
+        siteUrl: site_url
+      })
+    end
+
+    # Search Analytics API
+    def query_analytics(site_url, days: 30, dimensions: ['query'], row_limit: 50, start_date: nil, end_date: nil)
+      end_d   = end_date || Date.today.iso8601
+      start_d = start_date || (Date.today - days).iso8601
+
+      body = {
+        startDate: start_d,
+        endDate: end_d,
+        rowLimit: row_limit
+      }
+      body[:dimensions] = dimensions if dimensions && !dimensions.empty?
+
+      endpoint = "https://searchconsole.googleapis.com/webmasters/v3/sites/#{URI.encode_www_form_component(site_url)}/searchAnalytics/query"
+      res = @client.post(endpoint, body)
+      res.merge(start_date: start_d, end_date: end_d)
+    end
+
+    # Verified Sites List
+    def list_sites
+      @client.get('https://searchconsole.googleapis.com/webmasters/v3/sites')
+    end
+
+    # Sitemaps List
+    def list_sitemaps(site_url)
+      @client.get("https://searchconsole.googleapis.com/webmasters/v3/sites/#{URI.encode_www_form_component(site_url)}/sitemaps")
+    end
+
+    # Submit Sitemap
+    def submit_sitemap(site_url, feedpath)
+      @client.put("https://searchconsole.googleapis.com/webmasters/v3/sites/#{URI.encode_www_form_component(site_url)}/sitemaps/#{URI.encode_www_form_component(feedpath)}")
+    end
+  end
+
+  # XML Sitemap Parser supporting local files, remote URLs, and nested sitemap indexes
+  class SitemapLoader
+    def self.fetch_content(path_or_url)
+      if path_or_url.start_with?('http://', 'https://')
+        uri = URI(path_or_url)
+        res = Net::HTTP.get_response(uri)
+        raise "HTTP #{res.code} fetching sitemap: #{path_or_url}" unless res.is_a?(Net::HTTPSuccess)
+        res.body
+      else
+        raise "Local file not found: #{path_or_url}" unless File.exist?(path_or_url)
+        File.read(path_or_url)
+      end
+    end
+
+    def self.resolve_urls(input, default_origin = nil, quiet: false)
+      target_input = input
+      if target_input.nil? || target_input.empty?
+        candidates = [
+          'public/sitemap.xml',
+          'public/sitemap-0.xml',
+          'public/sitemap-index.xml',
+          'dist/sitemap.xml',
+          'dist/sitemap-index.xml'
+        ]
+        found = candidates.find { |f| File.exist?(f) }
+        if found
+          target_input = found
+          puts Color.c("📄 Auto-detected local sitemap: #{found}", Color::GRAY) unless quiet
+        elsif default_origin
+          target_input = "#{default_origin.chomp('/')}/sitemap.xml"
+          puts Color.c("🌐 Using remote sitemap URL: #{target_input}", Color::GRAY) unless quiet
+        else
+          raise 'No sitemap file or URL provided, and no local sitemap found.'
+        end
+      end
+
+      xml = fetch_content(target_input)
+      urls = []
+
+      # Parse child sitemaps if this is a sitemap index
+      sitemap_locs = xml.scan(/<sitemap>\s*<loc>([^<]+)<\/loc>/m).flatten
+      if sitemap_locs.any?
+        puts "📑 Found #{sitemap_locs.size} nested sitemaps in index..." unless quiet
+        sitemap_locs.each do |child_url|
+          child_url = child_url.strip
+          puts "   ↳ Loading child sitemap: #{child_url}" unless quiet
+          begin
+            child_xml = fetch_content(child_url)
+            urls.concat(child_xml.scan(/<url>\s*<loc>([^<]+)<\/loc>/m).flatten.map(&:strip))
+          rescue StandardError => e
+            puts Color.c("   ⚠️ Warning: Could not load child sitemap #{child_url}: #{e.message}", Color::YELLOW) unless quiet
+          end
+        end
+      else
+        urls.concat(xml.scan(/<loc>([^<]+)<\/loc>/m).flatten.map(&:strip))
+      end
+
+      urls.uniq
+    end
+  end
+
+  # CLI Command Runner
+  class CLI
+    VERSION = '1.3.0'
+
+    BANNER = <<~BANNER
+      #{Color::BOLD}#{Color::CYAN}╔══════════════════════════════════════════════════════════════╗
+      ║     🚀 GOOGLE SEARCH CONSOLE & INDEXING API (RUBY CLI)       ║
+      ╚══════════════════════════════════════════════════════════════╝#{Color::RESET}
+    BANNER
+
+    SKILL_MD_CONTENT = <<~SKILL
+      ---
+      name: gsc
+      description: Automates Google Search Console, Google Indexing API, live URL index inspection, sitemap batch submission, and search ranking analytics (queries, impressions, positions, CTR). Trigger whenever checking SEO rankings, inspecting Google indexing status, analyzing search impressions/clicks, or notifying Googlebot of new/updated pages.
+      ---
+
+      # Google Search Console & Indexing API (GSC CLI) Agent Skill
+
+      This skill allows AI agents (Google Antigravity, Claude Code, Cursor, Codex, etc.) to programmatically interact with Google Search Console and the Google Indexing API using the `gsc` CLI tool.
+
+      ## Key Capabilities
+      - **Search Analytics**: Query real keyword rankings, impressions, clicks, CTR, and average SERP positions.
+      - **Instant Googlebot Indexing**: Ping Google's Indexing API with `URL_UPDATED` or `URL_DELETED` to trigger immediate crawling.
+      - **Live URL Inspection**: Query Search Console API for actual index status (`PASS`, coverage state, canonical assigned by Google, crawl date).
+      - **Bulk Sitemap Audit**: Inspect entire XML sitemaps to identify indexed vs queued URLs.
+      - **Multi-domain Management**: Easily view or switch active domains across projects.
+
+      ---
+
+      ## Agent Rule: Always Use `--json` Flag
+      When running `gsc` commands from agent tools (`run_command`), **always append `--json`** to receive clean, machine-readable JSON output instead of ANSI terminal formatting:
+
+      ```bash
+      gsc top-queries --json
+      gsc inspect https://example.com/page --json
+      gsc performance --days 30 --json
+      ```
+
+      ---
+
+      ## Common Agent Workflows
+
+      ### 1. Analyzing Keyword Rankings & SEO Opportunities
+      When the user asks about traffic, rankings, or keyword performance:
+      ```bash
+      # Get top 20 queries for the active domain
+      gsc top-queries --limit 20 --json
+
+      # Get queries for a specific domain over the past 90 days
+      gsc top-queries -d example.com --days 90 --limit 50 --json
+      ```
+      **Interpretation Advice**:
+      - Sort queries by impressions to find high-volume search terms.
+      - Look for queries with position 4–15 with high impressions — these are prime candidates for on-page content optimization to push them into the top 3.
+
+      ### 2. Inspecting Page Index Status
+      When the user asks if a specific URL is indexed or why it's not showing up on Google:
+      ```bash
+      gsc inspect https://example.com/features/new-feature --json
+      ```
+      **Interpreting the JSON Response**:
+      - `verdict: "PASS"`: The page is successfully indexed and eligible for search results.
+      - `coverageState: "Crawled - currently not indexed"`: Google crawled the page but decided not to index it (often due to thin content, duplicate canonical, or low internal linking).
+      - `coverageState: "Discovered - currently not indexed"`: Google knows about the URL (via sitemap or link) but has not yet crawled it. You can trigger `gsc index <url>` to accelerate crawling.
+      - `robotsTxtState: "DISALLOWED"`: The page is blocked by `robots.txt`.
+
+      ### 3. Pinging Googlebot After Creating/Updating Content
+      Whenever you generate a new blog post, landing page, or programmatic SEO route, notify Googlebot immediately:
+      ```bash
+      gsc index https://example.com/blog/new-post --json
+      ```
+      *(If a page was permanently deleted, use `gsc remove <url> --json` to protect store crawl health).*
+
+      ### 4. Auditing Sitemaps
+      To bulk check whether all URLs in a sitemap are actually indexed:
+      ```bash
+      gsc inspect-sitemap https://example.com/sitemap.xml --delay 300 --json
+      ```
+
+      ### 5. Managing Active Domains & Credentials
+      ```bash
+      # Check current environment & key
+      gsc where --json
+
+      # List all verified domain properties accessible by key
+      gsc domains --json
+
+      # Set or switch active domain globally
+      gsc use example.com --json
+      ```
+
+      ---
+
+      ## Error Handling & Onboarding
+      - If `gsc` returns an error about missing credentials: Direct the user to run `gsc connect` in their terminal (which automatically scans `~/Downloads` for service account JSON keys or accepts a drag-and-drop), or run `gsc open` to reveal `~/.config/gsc/` in Finder.
+      - If `gsc` returns an error about permission restricted: Ensure the service account email is added as an **Owner** in Google Search Console Settings -> Users and permissions.
+    SKILL
+
+    def self.run(argv = ARGV)
+      $stdout.sync = true
+
+      options = {
+        domain: ENV['GSC_DOMAIN'],
+        key: ENV['GSC_KEY_PATH'],
+        days: 30,
+        limit: 50,
+        csv: nil,
+        delay: 120,
+        dry_run: false,
+        json: false
+      }
+
+      parser = OptionParser.new do |opts|
+        opts.banner = "Usage: gsc <command> [target] [options]"
+        opts.separator ""
+        opts.separator "Options:"
+
+        opts.on('-d', '--domain DOMAIN', 'Target domain (overrides default active domain)') do |d|
+          options[:domain] = d
+        end
+
+        opts.on('-k', '--key PATH', 'Path to Google Service Account JSON key') do |k|
+          options[:key] = k
+        end
+
+        opts.on('-j', '--json', 'Output machine-readable JSON (ideal for AI agents)') do
+          options[:json] = true
+        end
+
+        opts.on('--days DAYS', Integer, 'Time window for analytics in days (default: 30)') do |days|
+          options[:days] = days
+        end
+
+        opts.on('--limit LIMIT', Integer, 'Maximum rows to display (default: 50)') do |limit|
+          options[:limit] = limit
+        end
+
+        opts.on('--csv PATH', 'Export results to a CSV file') do |csv|
+          options[:csv] = csv
+        end
+
+        opts.on('--delay MS', Integer, 'Delay between sequential requests in ms (default: 120)') do |delay|
+          options[:delay] = delay
+        end
+
+        opts.on('--dry-run', 'Simulate API calls without mutating data') do
+          options[:dry_run] = true
+        end
+
+        opts.on('-v', '--version', 'Show version') do
+          print_version_info(options)
+          exit 0
+        end
+
+        opts.on('-h', '--help', 'Show help') do
+          puts BANNER
+          puts opts
+          print_commands_help
+          exit 0
+        end
+      end
+
+      args = parser.parse(argv)
+      command = args[0] || 'help'
+      target  = args[1]
+      extra   = args[2]
+
+      # Built-in config commands that don't need Google API authentication
+      case command
+      when 'version', '-v', '--version'
+        print_version_info(options)
+        exit 0
+      when 'update', 'upgrade'
+        handle_update_command(options)
+        exit 0
+      when 'where', 'which'
+        print_where_info(options)
+        exit 0
+      when 'use'
+        handle_use_command(target, options)
+        exit 0
+      when 'config'
+        handle_config_command(target, extra, options)
+        exit 0
+      when 'connect', 'setup', 'init', 'install'
+        handle_connect_wizard
+        exit 0
+      when 'open'
+        handle_open_command
+        exit 0
+      when 'skills', 'skill'
+        handle_skills_command(target, options)
+        exit 0
+      when 'help'
+        puts BANNER
+        puts parser
+        print_commands_help
+        exit 0
+      end
+
+      puts BANNER unless options[:json]
+
+      # 1. Locate and authenticate Service Account
+      key_path = Auth.find_key(options[:key])
+      unless key_path
+        if options[:json]
+          puts JSON.pretty_generate({ error: 'Service account JSON key not found. Run gsc connect to configure.' })
+        else
+          puts Color.c("\n❌ Error: Google Service Account Key JSON not found!\n", Color::RED, Color::BOLD)
+          puts "💡 #{Color::BOLD}Quick Setup:#{Color::RESET} Run #{Color.c('gsc connect', Color::CYAN, Color::BOLD)} to drag & drop your key or auto-detect from Downloads!"
+          puts "   Or run #{Color.c('gsc open', Color::CYAN)} to open the config folder in Finder."
+          puts
+          print_setup_instructions
+        end
+        exit 1
+      end
+
+      service_account = JSON.parse(File.read(key_path))
+      puts Color.c("🔑 Authenticated as: #{service_account['client_email']} (#{File.basename(key_path)})", Color::GRAY) unless options[:json]
+
+      # 2. Resolve domain
+      hostname, site_url, https_origin = resolve_domain(options[:domain], target, options)
+      puts Color.c("🎯 Target Domain:    #{hostname} (GSC Property: #{site_url})\n", Color::GRAY) unless options[:json]
+
+      # 3. Get OAuth Token
+      token = if options[:dry_run]
+                'DRY_RUN_MOCK_TOKEN'
+              else
+                Auth.fetch_access_token(service_account)
+              end
+
+      client = Client.new(token: token)
+      api    = API.new(client)
+
+      # 4. Execute Command
+      dispatch_command(command, target, api, options, hostname, site_url, https_origin)
+    rescue StandardError => e
+      if options && options[:json]
+        puts JSON.pretty_generate({ error: e.message })
+      else
+        puts Color.c("\n❌ Execution Error: #{e.message}", Color::RED, Color::BOLD)
+      end
+      exit 1
+    end
+
+    def self.dispatch_command(command, target, api, options, hostname, site_url, https_origin)
+      case command
+      when 'index'
+        require_target!(target, "index https://#{hostname}/page", options)
+        puts "🚀 Sending #{Color::BOLD}URL_UPDATED#{Color::RESET} indexing request for:\n   #{Color.c(target, Color::CYAN)}" unless options[:json]
+        return if simulate_dry_run?(options)
+
+        res = api.publish_url(target, 'URL_UPDATED')
+        if options[:json]
+          puts JSON.pretty_generate(res[:data] || { ok: res[:ok], status: res[:status] })
+        elsif res[:ok]
+          puts Color.c("\n✅ Success! Google Indexing API accepted the URL (HTTP 200).", Color::GREEN)
+          notify_time = res.dig(:data, 'urlNotificationMetadata', 'latestUpdate', 'notifyTime') || Time.now.iso8601
+          puts "   Notify Time: #{notify_time}"
+          puts Color.c("\nGooglebot will prioritize crawling this URL shortly.", Color::DIM)
+        else
+          puts Color.c("\n❌ Indexing API Error (#{res[:status]}): #{res[:data]}", Color::RED)
+        end
+
+      when 'remove'
+        require_target!(target, "remove https://#{hostname}/page", options)
+        puts "🗑️ Sending #{Color::BOLD}URL_DELETED#{Color::RESET} request for:\n   #{Color.c(target, Color::RED)}" unless options[:json]
+        return if simulate_dry_run?(options)
+
+        res = api.publish_url(target, 'URL_DELETED')
+        if options[:json]
+          puts JSON.pretty_generate(res[:data] || { ok: res[:ok], status: res[:status] })
+        elsif res[:ok]
+          puts Color.c("\n✅ Success! Google Indexing API recorded URL deletion.", Color::GREEN)
+        else
+          puts Color.c("\n❌ Indexing API Error (#{res[:status]}): #{res[:data]}", Color::RED)
+        end
+
+      when 'status'
+        require_target!(target, "status https://#{hostname}/page", options)
+        puts "🔍 Querying Indexing API metadata for:\n   #{Color.c(target, Color::CYAN)}\n" unless options[:json]
+        res = api.get_url_status(target)
+        if options[:json]
+          puts JSON.pretty_generate(res[:data])
+        elsif res[:ok]
+          puts Color.c("✅ Latest Notification Record:", Color::GREEN)
+          puts JSON.pretty_generate(res[:data])
+        else
+          puts Color.c("❌ Error (#{res[:status]}): #{res[:data]}", Color::RED)
+        end
+
+      when 'auto', 'index-sitemap'
+        puts "📥 Loading XML sitemap for #{Color.c(hostname, Color::CYAN)}..." unless options[:json]
+        urls = SitemapLoader.resolve_urls(target, https_origin, quiet: options[:json])
+        puts "📋 Found #{Color.c(urls.size.to_s, Color::BOLD)} URLs. Submitting batch to Google Indexing API...\n" unless options[:json]
+
+        success_count = 0
+        fail_count    = 0
+        results = []
+
+        urls.each_with_index do |u, idx|
+          progress = "[#{idx + 1}/#{urls.size}]".rjust(urls.size.to_s.length + 3)
+          print "  #{Color.c(progress, Color::GRAY)} #{u} " unless options[:json]
+
+          if options[:dry_run]
+            puts Color.c('[DRY RUN]', Color::YELLOW) unless options[:json]
+            success_count += 1
+            results << { url: u, status: 'simulated' }
+            next
+          end
+
+          res = api.publish_url(u, 'URL_UPDATED')
+          if res[:ok]
+            success_count += 1
+            puts Color.c('✔ OK', Color::GREEN) unless options[:json]
+            results << { url: u, status: 'ok', notifyTime: res.dig(:data, 'urlNotificationMetadata', 'latestUpdate', 'notifyTime') }
+          else
+            fail_count += 1
+            msg = res.dig(:data, 'error', 'message') || "HTTP #{res[:status]}"
+            puts Color.c("✖ Failed (#{msg})", Color::RED) unless options[:json]
+            results << { url: u, status: 'failed', error: msg }
+          end
+
+          sleep(options[:delay] / 1000.0) if options[:delay] > 0
+        end
+
+        if options[:json]
+          puts JSON.pretty_generate({ total: urls.size, success: success_count, failed: fail_count, results: results })
+        else
+          print_batch_summary(success_count, fail_count, urls.size)
+        end
+
+      when 'inspect'
+        require_target!(target, "inspect https://#{hostname}/page", options)
+        puts "🔍 Inspecting URL via Search Console API:\n   #{Color.c(target, Color::CYAN)} (Property: #{site_url})\n" unless options[:json]
+        res = api.inspect_url(target, site_url)
+        if options[:json]
+          r = res.dig(:data, 'inspectionResult', 'indexStatusResult') || {}
+          puts JSON.pretty_generate(r.merge('url' => target, 'ok' => res[:ok], 'status' => res[:status]))
+        elsif res[:ok]
+          r = res.dig(:data, 'inspectionResult', 'indexStatusResult')
+          if r
+            verdict_color = (r['verdict'] == 'PASS') ? Color::GREEN : Color::YELLOW
+            puts Color.c('📋 INDEXATION DIAGNOSTICS:', Color::BOLD)
+            puts "   Verdict:          #{Color.c(r['verdict'], verdict_color, Color::BOLD)}"
+            puts "   Coverage Status:  #{r['coverageState'] || 'Unknown'}"
+            puts "   Indexing Allowed: #{r['indexingState'] == 'INDEXING_ALLOWED' ? Color.c('ALLOWED', Color::GREEN) : Color.c(r['indexingState'] || 'NO', Color::RED)}"
+            puts "   Robots.txt:       #{r['robotsTxtState'] == 'ALLOWED' ? Color.c('ALLOWED', Color::GREEN) : Color.c(r['robotsTxtState'] || 'BLOCKED', Color::RED)}"
+            puts "   Last Crawled:     #{Color.c(r['lastCrawlTime'] || 'Never / Not yet recorded', Color::CYAN)}"
+            puts "   User Canonical:   #{r['userCanonical'] || 'None specified'}"
+            puts "   Google Canonical: #{r['googleCanonical'] || 'None assigned'}"
+          else
+            puts JSON.pretty_generate(res[:data])
+          end
+        else
+          puts Color.c("❌ Inspection Error (#{res[:status]}): #{res[:data]}", Color::RED)
+        end
+
+      when 'inspect-sitemap'
+        puts "📥 Loading sitemap for bulk inspection on #{Color.c(hostname, Color::CYAN)}..." unless options[:json]
+        urls = SitemapLoader.resolve_urls(target, https_origin, quiet: options[:json])
+        puts "🔍 Bulk inspecting #{Color.c(urls.size.to_s, Color::BOLD)} URLs via Search Console API (#{site_url})...\n" unless options[:json]
+
+        results = []
+        pass_count = 0
+        queue_count = 0
+        error_count = 0
+
+        unless options[:json]
+          puts Color.c("  #   | Status   | Last Crawl  | Coverage Status                     | URL", Color::DIM)
+          puts "  ------------------------------------------------------------------------------------------------"
+        end
+
+        urls.each_with_index do |u, idx|
+          idx_str = (idx + 1).to_s.rjust(4)
+          res = api.inspect_url(u, site_url)
+
+          if res[:ok]
+            r = res.dig(:data, 'inspectionResult', 'indexStatusResult')
+            verdict  = r ? r['verdict'] : 'UNKNOWN'
+            coverage = ((r && r['coverageState']) || 'Unknown').ljust(35)
+            last_cr  = (r && r['lastCrawlTime']) ? r['lastCrawlTime'].split('T').first : 'Never     '
+
+            if verdict == 'PASS'
+              pass_count += 1
+              puts "  #{idx_str} | #{Color.c('✅ PASS', Color::GREEN)}   | #{last_cr} | #{coverage} | #{u}" unless options[:json]
+            else
+              queue_count += 1
+              puts "  #{idx_str} | #{Color.c('⏳ QUEUE', Color::YELLOW)}  | #{last_cr} | #{coverage} | #{u}" unless options[:json]
+            end
+
+            results << {
+              url: u,
+              verdict: verdict,
+              coverage: r&.dig('coverageState') || 'Unknown',
+              last_crawl: r&.dig('lastCrawlTime') || 'Never',
+              robots_txt: r&.dig('robotsTxtState') || 'Unknown'
+            }
+          else
+            error_count += 1
+            puts "  #{idx_str} | #{Color.c('❌ ERROR', Color::RED)}  | ---------- | HTTP #{res[:status].to_s.ljust(30)} | #{u}" unless options[:json]
+            results << { url: u, verdict: 'ERROR', error: "HTTP #{res[:status]}" }
+          end
+
+          sleep(options[:delay] / 1000.0) if options[:delay] > 0
+        end
+
+        if options[:json]
+          puts JSON.pretty_generate({ total: urls.size, indexedPass: pass_count, pendingQueue: queue_count, errors: error_count, urls: results })
+        else
+          puts "\n#{Color::BOLD}══════════════════════════════════════════════════════════════#{Color::RESET}"
+          puts "#{Color::BOLD}📊 BULK INDEXATION SUMMARY (#{urls.size} URLs)#{Color::RESET}"
+          puts "#{Color::BOLD}══════════════════════════════════════════════════════════════#{Color::RESET}"
+          puts "  ✅ Indexed on Google (PASS): #{Color.c(pass_count.to_s, Color::GREEN, Color::BOLD)} (#{'%.1f' % ((pass_count.to_f / urls.size) * 100)}%)"
+          puts "  ⏳ Pending / Queue:          #{Color.c(queue_count.to_s, Color::YELLOW, Color::BOLD)} (#{'%.1f' % ((queue_count.to_f / urls.size) * 100)}%)"
+          puts "  ❌ Errors:                   #{Color.c(error_count.to_s, Color::RED, Color::BOLD)}" if error_count > 0
+          puts "#{Color::BOLD}══════════════════════════════════════════════════════════════#{Color::RESET}\n"
+
+          if options[:csv]
+            write_csv(options[:csv], ['URL', 'Verdict', 'Coverage', 'LastCrawl', 'RobotsTxt'], results.map(&:values))
+            puts Color.c("📁 Exported audit table to #{options[:csv]}\n", Color::CYAN)
+          end
+        end
+
+      when 'top-queries'
+        puts "📊 Fetching top search queries for #{Color.c(site_url, Color::CYAN)} (Past #{options[:days]} days)...\n" unless options[:json]
+        res = api.query_analytics(site_url, days: options[:days], dimensions: ['query'], row_limit: options[:limit])
+        if res[:ok]
+          rows = (res.dig(:data, 'rows') || []).map do |r|
+            {
+              query: r['keys'].first,
+              clicks: r['clicks'],
+              impressions: r['impressions'],
+              ctr: (r['ctr'] * 100).round(2),
+              position: r['position'].round(1)
+            }
+          end
+
+          if options[:json]
+            puts JSON.pretty_generate(rows)
+          elsif rows.empty?
+            puts Color.c("ℹ️ No search query data recorded in the last #{options[:days]} days.", Color::YELLOW)
+          else
+            puts "#{Color::BOLD}Clicks | Impressions | CTR    | Position | Query#{Color::RESET}"
+            puts "--------------------------------------------------------------------------------"
+            rows.each do |row|
+              clicks  = row[:clicks].to_s.ljust(6)
+              imp     = row[:impressions].to_s.ljust(11)
+              ctr     = "#{row[:ctr]}%".ljust(6)
+              pos     = row[:position].to_s.ljust(8)
+              puts "#{clicks} | #{imp} | #{ctr} | #{pos} | #{Color.c(row[:query], Color::CYAN)}"
+            end
+            puts "\n#{Color.c("Total Queries Displayed: #{rows.size}", Color::GRAY)}\n"
+
+            if options[:csv]
+              csv_data = rows.map { |r| [r[:query], r[:clicks], r[:impressions], r[:ctr], r[:position]] }
+              write_csv(options[:csv], %w[Query Clicks Impressions CTR Position], csv_data)
+              puts Color.c("📁 Exported queries to #{options[:csv]}", Color::CYAN)
+            end
+          end
+        else
+          if options[:json]
+            puts JSON.pretty_generate({ error: res[:data] })
+          else
+            puts Color.c("❌ Search Analytics Error (#{res[:status]}): #{res[:data]}", Color::RED)
+          end
+        end
+
+      when 'top-pages'
+        puts "📊 Fetching top performing pages for #{Color.c(site_url, Color::CYAN)} (Past #{options[:days]} days)...\n" unless options[:json]
+        res = api.query_analytics(site_url, days: options[:days], dimensions: ['page'], row_limit: options[:limit])
+        if res[:ok]
+          rows = (res.dig(:data, 'rows') || []).map do |r|
+            {
+              page: r['keys'].first,
+              clicks: r['clicks'],
+              impressions: r['impressions'],
+              ctr: (r['ctr'] * 100).round(2),
+              position: r['position'].round(1)
+            }
+          end
+
+          if options[:json]
+            puts JSON.pretty_generate(rows)
+          elsif rows.empty?
+            puts Color.c("ℹ️ No page performance data recorded in the last #{options[:days]} days.", Color::YELLOW)
+          else
+            puts "#{Color::BOLD}Clicks | Impressions | CTR    | Position | Page URL#{Color::RESET}"
+            puts "--------------------------------------------------------------------------------"
+            rows.each do |row|
+              clicks  = row[:clicks].to_s.ljust(6)
+              imp     = row[:impressions].to_s.ljust(11)
+              ctr     = "#{row[:ctr]}%".ljust(6)
+              pos     = row[:position].to_s.ljust(8)
+              puts "#{clicks} | #{imp} | #{ctr} | #{pos} | #{Color.c(row[:page], Color::CYAN)}"
+            end
+            puts "\n#{Color.c("Total Pages Displayed: #{rows.size}", Color::GRAY)}\n"
+
+            if options[:csv]
+              csv_data = rows.map { |r| [r[:page], r[:clicks], r[:impressions], r[:ctr], r[:position]] }
+              write_csv(options[:csv], %w[Page Clicks Impressions CTR Position], csv_data)
+              puts Color.c("📁 Exported pages to #{options[:csv]}", Color::CYAN)
+            end
+          end
+        else
+          if options[:json]
+            puts JSON.pretty_generate({ error: res[:data] })
+          else
+            puts Color.c("❌ Search Analytics Error (#{res[:status]}): #{res[:data]}", Color::RED)
+          end
+        end
+
+      when 'performance'
+        puts "📈 Calculating Search Console Performance for #{Color.c(site_url, Color::CYAN)} (Past #{options[:days]} days)...\n" unless options[:json]
+        res = api.query_analytics(site_url, days: options[:days], dimensions: [])
+        if res[:ok]
+          row = res.dig(:data, 'rows', 0) || { 'clicks' => 0, 'impressions' => 0, 'ctr' => 0, 'position' => 0 }
+          payload = {
+            clicks: row['clicks'],
+            impressions: row['impressions'],
+            ctr: (row['ctr'] * 100).round(2),
+            position: row['position'].round(1),
+            startDate: res[:start_date],
+            endDate: res[:end_date]
+          }
+
+          if options[:json]
+            puts JSON.pretty_generate(payload)
+          else
+            puts "#{Color::BOLD}══════════════════════════════════════════════════════════════#{Color::RESET}"
+            puts "#{Color::BOLD}📊 SEARCH PERFORMANCE TOTALS (#{res[:start_date]} to #{res[:end_date]})#{Color::RESET}"
+            puts "#{Color::BOLD}══════════════════════════════════════════════════════════════#{Color::RESET}"
+            puts "  🔵 Total Clicks:       #{Color.c(row['clicks'].to_s, Color::GREEN, Color::BOLD)}"
+            puts "  🟣 Total Impressions:  #{Color.c(row['impressions'].to_s, Color::MAGENTA, Color::BOLD)}"
+            puts "  🟢 Average CTR:        #{Color.c("#{'%.2f' % (row['ctr'] * 100)}%", Color::CYAN, Color::BOLD)}"
+            puts "  🟠 Average Position:   #{Color.c(('%.1f' % row['position']), Color::YELLOW, Color::BOLD)}"
+            puts "#{Color::BOLD}══════════════════════════════════════════════════════════════#{Color::RESET}\n"
+          end
+        else
+          if options[:json]
+            puts JSON.pretty_generate({ error: res[:data] })
+          else
+            puts Color.c("❌ Performance API Error (#{res[:status]}): #{res[:data]}", Color::RED)
+          end
+        end
+
+      when 'sitemaps-list'
+        puts "📑 Fetching submitted sitemaps for #{Color.c(site_url, Color::CYAN)}...\n" unless options[:json]
+        res = api.list_sitemaps(site_url)
+        if options[:json]
+          puts JSON.pretty_generate(res[:data] || {})
+        elsif res[:ok]
+          sitemaps = res.dig(:data, 'sitemap') || []
+          if sitemaps.empty?
+            puts Color.c("ℹ️ No sitemaps currently submitted in Search Console for this property.", Color::YELLOW)
+          else
+            puts "#{Color::BOLD}Type         | Last Downloaded | Errors | Warnings | Path#{Color::RESET}"
+            puts "--------------------------------------------------------------------------------"
+            sitemaps.each do |sm|
+              type    = (sm['type'] || 'sitemap').ljust(12)
+              last_dl = sm['lastDownloaded'] ? sm['lastDownloaded'].split('T').first : 'Never     '
+              errors  = (sm['errors'] || 0).to_s.ljust(6)
+              warns   = (sm['warnings'] || 0).to_s.ljust(8)
+              puts "#{type} | #{last_dl}      | #{errors} | #{warns} | #{Color.c(sm['path'], Color::CYAN)}"
+            end
+          end
+          puts
+        else
+          puts Color.c("❌ Error (#{res[:status]}): #{res[:data]}", Color::RED)
+        end
+
+      when 'sitemaps-submit'
+        sitemap_url = target || "#{https_origin}/sitemap.xml"
+        puts "📤 Submitting sitemap to Google Search Console:\n   #{Color.c(sitemap_url, Color::CYAN)} (Property: #{site_url})\n" unless options[:json]
+        res = api.submit_sitemap(site_url, sitemap_url)
+        if options[:json]
+          puts JSON.pretty_generate({ ok: res[:ok], status: res[:status], sitemap: sitemap_url })
+        elsif res[:ok] || res[:status] == 204
+          puts Color.c("✅ Success! Sitemap registered with Google Search Console.", Color::GREEN)
+        else
+          puts Color.c("❌ Failed to submit sitemap (#{res[:status]}): #{res[:data]}", Color::RED)
+        end
+
+      when 'sites-list', 'domains'
+        puts "🌐 Fetching all Search Console properties accessible by key...\n" unless options[:json]
+        res = api.list_sites
+        if res[:ok]
+          entries = res.dig(:data, 'siteEntry') || []
+          active_dom = Config.default_domain
+          mapped = entries.map do |s|
+            is_active = active_dom && s['siteUrl'].include?(active_dom)
+            s.merge('active' => !!is_active)
+          end
+
+          if options[:json]
+            puts JSON.pretty_generate(mapped)
+          elsif entries.empty?
+            puts Color.c("⚠️ No Search Console properties found.", Color::YELLOW)
+          else
+            puts "#{Color::BOLD}Permission Level  | Site Property Identifier#{Color::RESET}"
+            puts "--------------------------------------------------------------------------------"
+            mapped.each do |s|
+              level = (s['permissionLevel'] || 'Unknown').ljust(17)
+              site_str = Color.c(s['siteUrl'], Color::CYAN)
+              suffix = s['active'] ? " #{Color.c('👈 [ACTIVE]', Color::GREEN, Color::BOLD)}" : ""
+              puts "#{level} | #{site_str}#{suffix}"
+            end
+            puts
+          end
+        else
+          if options[:json]
+            puts JSON.pretty_generate({ error: res[:data] })
+          else
+            puts Color.c("❌ Error (#{res[:status]}): #{res[:data]}", Color::RED)
+          end
+        end
+
+      when 'audit'
+        puts "#{Color::BOLD}🚀 RUNNING COMPREHENSIVE SEO & INDEX AUDIT FOR: #{Color.c(hostname, Color::CYAN)}#{Color::RESET}\n" unless options[:json]
+        audit_data = { domain: hostname, siteUrl: site_url }
+
+        # 1. Check Sites Permission
+        sites_res = api.list_sites
+        access_ok = false
+        if sites_res[:ok]
+          entries = sites_res.dig(:data, 'siteEntry') || []
+          access_ok = entries.any? { |s| s['siteUrl'] == site_url || s['siteUrl'].include?(hostname) }
+        end
+        audit_data[:verifiedAccess] = access_ok
+        print "  [1/4] Checking Search Console API Permissions... " unless options[:json]
+        puts access_ok ? Color.c('✅ Verified Access', Color::GREEN) : Color.c("⚠️ Access restricted (#{site_url})", Color::YELLOW) unless options[:json]
+
+        # 2. Fetch Performance
+        perf_res = api.query_analytics(site_url, days: 30)
+        perf_row = perf_res.dig(:data, 'rows', 0) || { 'clicks' => 0, 'impressions' => 0, 'position' => 0 }
+        audit_data[:performance30d] = {
+          clicks: perf_row['clicks'],
+          impressions: perf_row['impressions'],
+          averagePosition: perf_row['position'].round(1)
+        }
+        print "  [2/4] Fetching 30-Day Search Analytics... " unless options[:json]
+        puts Color.c("✅ #{perf_row['clicks']} Clicks, #{perf_row['impressions']} Impressions, Pos #{'%.1f' % perf_row['position']}", Color::GREEN) unless options[:json]
+
+        # 3. Check Sitemaps
+        sm_res = api.list_sitemaps(site_url)
+        sitemaps = sm_res[:ok] ? (sm_res.dig(:data, 'sitemap') || []) : []
+        audit_data[:activeSitemaps] = sitemaps.size
+        print "  [3/4] Checking Registered Sitemaps... " unless options[:json]
+        puts sitemaps.any? ? Color.c("✅ #{sitemaps.size} sitemaps active", Color::GREEN) : Color.c("⚠️ No sitemaps found in GSC.", Color::YELLOW) unless options[:json]
+
+        # 4. Check Homepage Index Status
+        home_res = api.inspect_url("#{https_origin}/", site_url)
+        verdict = home_res.dig(:data, 'inspectionResult', 'indexStatusResult', 'verdict') || 'UNKNOWN'
+        audit_data[:homepageVerdict] = verdict
+        print "  [4/4] Inspecting Homepage Index Status... " unless options[:json]
+        puts verdict == 'PASS' ? Color.c('✅ PASS (Indexed)', Color::GREEN) : Color.c("⏳ #{verdict}", Color::YELLOW) unless options[:json]
+
+        if options[:json]
+          puts JSON.pretty_generate(audit_data)
+        else
+          puts "\n#{Color::BOLD}══════════════════════════════════════════════════════════════#{Color::RESET}\n"
+        end
+
+      else
+        if options[:json]
+          puts JSON.pretty_generate({ error: "Unknown command: #{command}" })
+        else
+          puts Color.c("❌ Unknown command: '#{command}'. Run 'gsc --help' for options.", Color::RED)
+        end
+        exit 1
+      end
+    end
+
+    def self.handle_connect_wizard
+      puts BANNER
+      puts "#{Color::BOLD}🪄  GSC INTERACTIVE SETUP WIZARD#{Color::RESET}\n"
+
+      key_file = nil
+
+      # 1. Check ~/Downloads for recent Google Cloud keys
+      downloads_dir = File.expand_path('~/Downloads')
+      if Dir.exist?(downloads_dir)
+        recent_keys = Dir.glob(File.join(downloads_dir, '*.json')).select do |f|
+          next false if File.size(f) > 50_000 # Service account keys are ~2KB
+          content = File.read(f) rescue ""
+          content.include?('"client_email"') && content.include?('"private_key"')
+        end.sort_by { |f| File.mtime(f) rescue Time.at(0) }.reverse
+
+        if recent_keys.any?
+          latest = recent_keys.first
+          sa = JSON.parse(File.read(latest)) rescue {}
+          if sa['client_email']
+            puts "🔍 Found recently downloaded service account key in Downloads:"
+            puts "   #{Color.c(File.basename(latest), Color::CYAN)} (#{sa['client_email']})"
+            print "Use this key? [Y/n]: "
+            choice = $stdin.gets&.strip
+            if choice.nil? || choice.empty? || choice.downcase == 'y'
+              key_file = latest
+            end
+          end
+        end
+      end
+
+      # 2. Prompt drag and drop if not selected
+      unless key_file
+        puts "\n👉 #{Color::BOLD}Drag and drop your downloaded Google Cloud JSON key into this terminal#{Color::RESET}"
+        print "(or paste the file path): "
+        input = $stdin.gets&.strip
+        if input.nil? || input.empty?
+          puts Color.c("Setup cancelled.", Color::YELLOW)
+          exit 0
+        end
+
+        # Clean drag-and-drop escaped paths in mac terminal (escaped spaces or quotes)
+        cleaned_path = input.gsub(/^['"]|['"]$/, '').gsub('\\ ', ' ')
+        cleaned_path = File.expand_path(cleaned_path)
+        unless File.exist?(cleaned_path)
+          puts Color.c("❌ Error: File not found at: #{cleaned_path}", Color::RED)
+          exit 1
+        end
+        key_file = cleaned_path
+      end
+
+      # 3. Validate JSON
+      begin
+        sa = JSON.parse(File.read(key_file))
+        unless sa['client_email'] && sa['private_key']
+          puts Color.c("❌ Error: Selected JSON file is missing client_email or private_key.", Color::RED)
+          exit 1
+        end
+      rescue StandardError => e
+        puts Color.c("❌ Error parsing JSON: #{e.message}", Color::RED)
+        exit 1
+      end
+
+      # 4. Save to ~/.config/gsc/service-account.json
+      dest = File.join(Config::CONFIG_DIR, 'service-account.json')
+      FileUtils.mkdir_p(Config::CONFIG_DIR)
+      FileUtils.cp(key_file, dest)
+      Config.set_key_path(dest)
+      puts Color.c("\n✅ Successfully saved key to: #{dest}", Color::GREEN, Color::BOLD)
+      puts "   Service Account: #{Color.c(sa['client_email'], Color::CYAN)}"
+
+      # 5. Live test connection
+      print "\n🔄 Testing connection to Google OAuth2 API... "
+      token = nil
+      begin
+        token = Auth.fetch_access_token(sa)
+        puts Color.c("Connected! (Token acquired)", Color::GREEN)
+      rescue StandardError => e
+        puts Color.c("Failed! #{e.message}", Color::RED)
+        exit 1
+      end
+
+      # 6. Fetch verified domains
+      print "🌐 Querying verified Search Console domain properties... "
+      client = Client.new(token: token)
+      api = API.new(client)
+      sites_res = api.list_sites
+
+      if sites_res[:ok]
+        entries = sites_res.dig(:data, 'siteEntry') || []
+        if entries.empty?
+          puts Color.c("\n⚠️  No domain properties found in Search Console yet.", Color::YELLOW)
+          puts "\n#{Color::BOLD}Next Step:#{Color::RESET}"
+          puts "1. Go to: https://search.google.com/search-console/"
+          puts "2. In Settings > Users and permissions, click 'Add user'"
+          puts "3. Paste: #{Color.c(sa['client_email'], Color::CYAN)}"
+          puts "4. Set permission to #{Color::BOLD}Owner#{Color::RESET} and click Add."
+          puts "\nThen run #{Color.c('gsc domains', Color::CYAN)} anytime to verify!"
+        else
+          puts Color.c("Found #{entries.size} properties!\n", Color::GREEN)
+          puts "#{Color::BOLD}Available Search Console Domains:#{Color::RESET}"
+          entries.each_with_index do |s, idx|
+            puts "  #{idx + 1}) #{Color.c(s['siteUrl'], Color::CYAN)}"
+          end
+
+          print "\nChoose a default domain (1-#{entries.size}) [1]: "
+          choice = $stdin.gets&.strip
+          idx = (choice && !choice.empty?) ? (choice.to_i - 1) : 0
+          idx = 0 if idx < 0 || idx >= entries.size
+
+          selected_url = entries[idx]['siteUrl']
+          clean_dom = Config.set_default_domain(selected_url)
+          puts Color.c("✅ Default domain set to: #{clean_dom}", Color::GREEN, Color::BOLD)
+        end
+      end
+
+      puts "\n#{Color::BOLD}══════════════════════════════════════════════════════════════#{Color::RESET}"
+      puts "#{Color::BOLD}🎉 SETUP COMPLETE!#{Color::RESET}"
+      puts "You can now run:"
+      puts "   #{Color.c('gsc top-queries', Color::CYAN)}     - See your Google search rankings"
+      puts "   #{Color.c('gsc performance', Color::CYAN)}     - 30-day search performance summary"
+      puts "   #{Color.c('gsc audit', Color::CYAN)}           - Full automated SEO audit"
+      puts "   #{Color.c('gsc open', Color::CYAN)}            - Reveal config folder in Finder"
+      puts "#{Color::BOLD}══════════════════════════════════════════════════════════════#{Color::RESET}\n"
+    end
+
+    def self.handle_open_command
+      dir = Config::CONFIG_DIR
+      FileUtils.mkdir_p(dir)
+      puts "📂 Opening #{Color.c(dir, Color::CYAN)} in Finder..."
+      if RUBY_PLATFORM =~ /darwin/
+        system("open '#{dir}'")
+      elsif RUBY_PLATFORM =~ /linux/
+        system("xdg-open '#{dir}' 2>/dev/null || open '#{dir}' 2>/dev/null")
+      end
+    end
+
+    def self.print_version_info(options)
+      if options[:json]
+        puts JSON.pretty_generate({
+          name: 'gsc',
+          version: VERSION,
+          ruby: RUBY_VERSION,
+          platform: RUBY_PLATFORM,
+          executable: File.expand_path($PROGRAM_NAME),
+          configFile: Config::CONFIG_FILE
+        })
+      else
+        puts "#{Color::BOLD}gsc#{Color::RESET} version #{Color.c(VERSION, Color::GREEN, Color::BOLD)} (Ruby #{RUBY_VERSION} #{RUBY_PLATFORM})"
+        puts "   Executable: #{File.expand_path($PROGRAM_NAME)}"
+        puts "   Config:     #{Config::CONFIG_FILE}"
+      end
+    end
+
+    def self.handle_update_command(options)
+      repo_url = Config.load['update_url'] || ENV['GSC_UPDATE_URL']
+
+      if repo_url.nil? || repo_url.empty?
+        if options[:json]
+          puts JSON.pretty_generate({ error: 'No update URL configured. Set with: gsc config set-update-url <url>' })
+        else
+          puts BANNER
+          puts Color.c("ℹ️ Current version is #{VERSION}.", Color::CYAN)
+          puts "\nTo enable 1-click updates from your GitHub repository or Gist:"
+          puts "   #{Color.c('gsc config set-update-url https://raw.githubusercontent.com/<user>/<repo>/main/gsc.rb', Color::CYAN)}"
+          puts "\nThen run #{Color.c('gsc update', Color::GREEN, Color::BOLD)} to self-update anytime!"
+        end
+        return
+      end
+
+      puts "🔄 Checking for updates from: #{Color.c(repo_url, Color::CYAN)}..." unless options[:json]
+
+      begin
+        uri = URI(repo_url)
+        http = Net::HTTP.new(uri.host, uri.port)
+        http.use_ssl = (uri.scheme == 'https')
+        http.open_timeout = 6
+        http.read_timeout = 10
+
+        req = Net::HTTP::Get.new(uri.request_uri)
+        req['User-Agent'] = "gsc-cli/#{VERSION}"
+        res = http.request(req)
+
+        if res.code != '200'
+          raise "Could not fetch update from #{repo_url} (HTTP #{res.code})"
+        end
+
+        remote_script = res.body
+        remote_version = remote_script[/VERSION\s*=\s*['"]([^'"]+)['"]/, 1] || 'unknown'
+
+        if remote_version == VERSION
+          if options[:json]
+            puts JSON.pretty_generate({ status: 'up-to-date', currentVersion: VERSION })
+          else
+            puts Color.c("✨ You are already running the latest version of gsc (#{VERSION})!", Color::GREEN, Color::BOLD)
+          end
+          return
+        end
+
+        # Validate syntax of downloaded script
+        require 'tempfile'
+        temp = Tempfile.new(['gsc-update', '.rb'])
+        temp.write(remote_script)
+        temp.close
+
+        syntax_ok = system("ruby -c '#{temp.path}' >/dev/null 2>&1")
+        unless syntax_ok
+          temp.unlink
+          raise "Downloaded script failed Ruby syntax verification."
+        end
+
+        target_bin = File.expand_path($PROGRAM_NAME)
+        dest_paths = [target_bin]
+        default_local = File.expand_path('~/.local/bin/gsc')
+        dest_paths << default_local if File.exist?(default_local) && !dest_paths.include?(default_local)
+
+        dest_paths.each do |path|
+          File.write(path, remote_script)
+          File.chmod(0755, path)
+        end
+        temp.unlink
+
+        if options[:json]
+          puts JSON.pretty_generate({ status: 'updated', from: VERSION, to: remote_version, paths: dest_paths })
+        else
+          puts Color.c("🎉 Successfully updated gsc from v#{VERSION} to v#{remote_version}!", Color::GREEN, Color::BOLD)
+          puts "   Updated binary: #{dest_paths.join(', ')}"
+        end
+      rescue StandardError => e
+        if options[:json]
+          puts JSON.pretty_generate({ error: e.message })
+        else
+          puts Color.c("❌ Update failed: #{e.message}", Color::RED)
+          puts "💡 To change update URL, run: #{Color.c('gsc config set-update-url <url>', Color::CYAN)}"
+        end
+        exit 1
+      end
+    end
+
+    def self.handle_skills_command(subcommand, options)
+      gemini_dir  = File.expand_path('~/.gemini/config/skills/gsc')
+      gemini_path = File.join(gemini_dir, 'SKILL.md')
+
+      claude_dir  = File.expand_path('~/.claude/skills/gsc')
+      claude_path = File.join(claude_dir, 'SKILL.md')
+
+      local_dir   = File.expand_path('.agents/skills/gsc')
+      local_path  = File.join(local_dir, 'SKILL.md')
+
+      case subcommand
+      when 'install', 'setup', 'update'
+        installed = []
+
+        # 1. Google Antigravity / Gemini
+        if Dir.exist?(File.expand_path('~/.gemini')) || (!Dir.exist?(File.expand_path('~/.claude')) && !options[:local])
+          FileUtils.mkdir_p(gemini_dir)
+          File.write(gemini_path, SKILL_MD_CONTENT)
+          installed << { platform: 'Antigravity / Gemini', path: gemini_path }
+        end
+
+        # 2. Claude Code
+        if Dir.exist?(File.expand_path('~/.claude'))
+          FileUtils.mkdir_p(claude_dir)
+          File.write(claude_path, SKILL_MD_CONTENT)
+          installed << { platform: 'Claude Code', path: claude_path }
+        end
+
+        # 3. Universal Workspace (.agents/skills/gsc)
+        if options[:local] || Dir.exist?(File.expand_path('.agents'))
+          FileUtils.mkdir_p(local_dir)
+          File.write(local_path, SKILL_MD_CONTENT)
+          installed << { platform: 'Universal Workspace (.agents)', path: local_path }
+        end
+
+        if options[:json]
+          puts JSON.pretty_generate({ status: 'ok', installed: installed })
+        else
+          puts BANNER
+          puts Color.c("✅ Agent Skill installed successfully across detected platforms:", Color::GREEN, Color::BOLD)
+          installed.each do |inst|
+            puts "   • #{Color.c(inst[:platform], Color::BOLD)}: #{Color.c(inst[:path], Color::CYAN)}"
+          end
+          puts "\nAI agents will now automatically detect and trigger GSC commands for SEO and indexing tasks."
+          puts
+        end
+      when 'show', 'cat', 'raw'
+        puts SKILL_MD_CONTENT
+      else
+        installed = []
+        installed << { platform: 'Antigravity / Gemini', path: gemini_path } if File.exist?(gemini_path)
+        installed << { platform: 'Claude Code', path: claude_path } if File.exist?(claude_path)
+        installed << { platform: 'Universal Workspace (.agents)', path: local_path } if File.exist?(local_path)
+
+        if options[:json]
+          puts JSON.pretty_generate({
+            skill: 'gsc',
+            installed: !installed.empty?,
+            locations: installed,
+            description: 'Automates Google Search Console, Google Indexing API, live URL index inspection, sitemap batch submission, and search ranking analytics.'
+          })
+          return
+        end
+
+        puts BANNER
+        puts "#{Color::BOLD}🤖 GSC AI AGENT SKILL (Platform-Agnostic):#{Color::RESET}"
+        if installed.empty?
+          puts "   Status:   #{Color.c('⚠️ Not currently installed', Color::YELLOW, Color::BOLD)}"
+          puts "   Install:  Run #{Color.c('gsc skills install', Color::CYAN)} to auto-detect and install for your agent."
+        else
+          puts "   Status:   #{Color.c('✅ Installed and active', Color::GREEN, Color::BOLD)}"
+          installed.each do |inst|
+            puts "   • #{inst[:platform]}: #{Color.c(inst[:path], Color::CYAN)}"
+          end
+        end
+        puts
+        puts "#{Color::BOLD}Agent Features & Capabilities:#{Color::RESET}"
+        puts "   • #{Color.c('gsc top-queries --json', Color::CYAN)}      - Query real SERP rankings, impressions, and CTR"
+        puts "   • #{Color.c('gsc inspect <url> --json', Color::CYAN)}    - Live index status & Googlebot crawl verdict"
+        puts "   • #{Color.c('gsc index <url> --json', Color::CYAN)}      - Instant Googlebot re-crawl notification"
+        puts "   • #{Color.c('gsc audit --json', Color::CYAN)}            - Automated 4-step SEO & indexing health audit"
+        puts "   • #{Color.c('gsc domains --json', Color::CYAN)}          - List verified properties & active domain"
+        puts
+        puts "#{Color::BOLD}Available subcommands:#{Color::RESET}"
+        puts "   #{Color.c('gsc skills', Color::CYAN)}                    Display skill status across agent platforms"
+        puts "   #{Color.c('gsc skills install', Color::CYAN)}            Auto-install to ~/.gemini, ~/.claude, and .agents"
+        puts "   #{Color.c('gsc skills show', Color::CYAN)}               Print raw SKILL.md markdown for any agent"
+        puts
+      end
+    end
+
+    def self.print_where_info(options)
+      key_path = Auth.find_key(options[:key])
+      sa = key_path ? (JSON.parse(File.read(key_path)) rescue {}) : {}
+
+      if options[:json]
+        puts JSON.pretty_generate({
+          executable: File.expand_path($PROGRAM_NAME),
+          configDirectory: Config::CONFIG_DIR,
+          configFile: Config::CONFIG_FILE,
+          activeKey: key_path,
+          serviceAccount: sa['client_email'],
+          activeDomain: Config.default_domain
+        })
+        return
+      end
+
+      puts BANNER
+      puts "#{Color::BOLD}📍 GSC CLI INSTALLATION & ENVIRONMENT:#{Color::RESET}"
+      puts "   Executable:       #{Color.c(File.expand_path($PROGRAM_NAME), Color::CYAN)}"
+      puts "   Config Directory: #{Color.c(Config::CONFIG_DIR, Color::CYAN)}"
+      puts "   Config File:      #{Color.c(Config::CONFIG_FILE, Color::CYAN)}"
+      if key_path
+        puts "   Active Key:       #{Color.c(key_path, Color::GREEN)} (#{sa['client_email']})"
+      else
+        puts "   Active Key:       #{Color.c('None found (run: gsc connect)', Color::YELLOW)}"
+      end
+      active_dom = Config.default_domain
+      puts "   Active Domain:    #{active_dom ? Color.c(active_dom, Color::GREEN, Color::BOLD) : Color.c('(none - run: gsc use <domain>)', Color::GRAY)}"
+      puts
+    end
+
+    def self.handle_use_command(domain_arg, options)
+      if domain_arg.nil? || domain_arg.empty?
+        active = Config.default_domain
+        if options[:json]
+          puts JSON.pretty_generate({ activeDomain: active })
+          return
+        end
+        puts BANNER
+        if active
+          puts "Current active domain is: #{Color.c(active, Color::GREEN, Color::BOLD)}"
+          puts "To switch domains, run: #{Color.c('gsc use <domain>', Color::CYAN)}"
+        else
+          puts Color.c("No active domain is currently set.", Color::YELLOW)
+          puts "Usage: gsc use <domain>"
+          puts "Example: gsc use example.com"
+        end
+        puts
+        return
+      end
+
+      clean = Config.set_default_domain(domain_arg)
+      if options[:json]
+        puts JSON.pretty_generate({ status: 'ok', activeDomain: clean })
+        return
+      end
+
+      puts BANNER
+      puts Color.c("✅ Active default domain set to: #{clean}", Color::GREEN, Color::BOLD)
+      puts Color.c("   Saved to #{Config::CONFIG_FILE}", Color::GRAY)
+      puts "\nNow all commands (#{Color.c('gsc top-queries')}, #{Color.c('gsc audit')}, #{Color.c('gsc performance')}) will automatically target #{Color.c(clean, Color::CYAN)} without needing -d!"
+      puts
+    end
+
+    def self.handle_config_command(subcommand, subvalue, options)
+      case subcommand
+      when 'set-domain', 'domain'
+        if subvalue.nil? || subvalue.empty?
+          if options[:json]
+            puts JSON.pretty_generate({ error: 'Please specify a domain' })
+          else
+            puts Color.c("❌ Error: Please specify a domain.", Color::RED)
+          end
+          exit 1
+        end
+        clean = Config.set_default_domain(subvalue)
+        if options[:json]
+          puts JSON.pretty_generate({ status: 'ok', defaultDomain: clean })
+        else
+          puts BANNER
+          puts Color.c("✅ Default domain updated to: #{clean}", Color::GREEN, Color::BOLD)
+        end
+      when 'set-key', 'key'
+        if subvalue.nil? || !File.exist?(subvalue)
+          if options[:json]
+            puts JSON.pretty_generate({ error: "Key file does not exist: #{subvalue}" })
+          else
+            puts Color.c("❌ Error: Key file does not exist: #{subvalue}", Color::RED)
+          end
+          exit 1
+        end
+        dest = File.join(Config::CONFIG_DIR, 'service-account.json')
+        FileUtils.mkdir_p(Config::CONFIG_DIR)
+        FileUtils.cp(subvalue, dest)
+        Config.set_key_path(dest)
+        if options[:json]
+          puts JSON.pretty_generate({ status: 'ok', keyPath: dest })
+        else
+          puts BANNER
+          puts Color.c("✅ Service account key copied to: #{dest}", Color::GREEN, Color::BOLD)
+        end
+      when 'set-update-url', 'update-url'
+        if subvalue.nil? || subvalue.empty?
+          if options[:json]
+            puts JSON.pretty_generate({ error: 'Please specify an update URL' })
+          else
+            puts Color.c("❌ Error: Please specify an update URL.", Color::RED)
+          end
+          exit 1
+        end
+        Config.save('update_url' => subvalue)
+        if options[:json]
+          puts JSON.pretty_generate({ status: 'ok', updateUrl: subvalue })
+        else
+          puts BANNER
+          puts Color.c("✅ Update source URL saved to: #{subvalue}", Color::GREEN, Color::BOLD)
+        end
+      else
+        cfg = Config.load
+        key_path = Auth.find_key(options[:key])
+        sa = key_path ? (JSON.parse(File.read(key_path)) rescue {}) : {}
+
+        if options[:json]
+          puts JSON.pretty_generate(cfg.merge({
+            configFile: Config::CONFIG_FILE,
+            keyLocation: key_path,
+            serviceAccount: sa['client_email']
+          }))
+          return
+        end
+
+        puts BANNER
+        puts "#{Color::BOLD}⚙️  GSC CLI CONFIGURATION:#{Color::RESET}"
+        puts "   Config File:     #{Color.c(Config::CONFIG_FILE, Color::CYAN)}"
+        puts "   Default Domain:  #{cfg['default_domain'] ? Color.c(cfg['default_domain'], Color::GREEN, Color::BOLD) : Color.c('(not set - run: gsc use <domain>)', Color::GRAY)}"
+        if key_path
+          puts "   Key Location:    #{Color.c(key_path, Color::CYAN)}"
+          puts "   Service Account: #{Color.c(sa['client_email'], Color::GREEN)}"
+        else
+          puts "   Key Location:    #{Color.c('Not found', Color::RED)}"
+        end
+        puts
+        puts "#{Color::BOLD}Configuration shortcuts:#{Color::RESET}"
+        puts "   gsc connect                  Interactive setup wizard (drag & drop key)"
+        puts "   gsc use <domain>             Set active default domain"
+        puts "   gsc open                     Open config directory in Finder"
+        puts "   gsc where                    Show install path and paths summary"
+        puts
+      end
+    end
+
+    def self.resolve_domain(domain_arg, target_arg, options = {})
+      raw = domain_arg
+      if raw.nil? || raw.empty?
+        if target_arg && target_arg.start_with?('http://', 'https://')
+          raw = URI(target_arg).hostname
+        else
+          raw = ENV['GSC_DOMAIN'] || Config.default_domain
+        end
+      end
+
+      if raw.nil? || raw.empty?
+        if options[:json]
+          puts JSON.pretty_generate({ error: 'No target domain specified. Run gsc use <domain> or pass -d <domain>.' })
+        else
+          puts Color.c("\n⚠️  No target domain specified!", Color::YELLOW, Color::BOLD)
+          puts "Please specify a domain using one of the following:"
+          puts "  1. Set a global active domain:  #{Color.c('gsc use <domain>', Color::CYAN)}"
+          puts "  2. Pass domain flag:            #{Color.c('gsc <command> -d <domain>', Color::CYAN)}"
+          puts "  3. Set environment variable:    #{Color.c('export GSC_DOMAIN=<domain>', Color::CYAN)}"
+          puts
+        end
+        exit 1
+      end
+
+      if raw.start_with?('sc-domain:')
+        hostname = raw.sub('sc-domain:', '')
+        site_url = raw
+      elsif raw.start_with?('http://', 'https://')
+        uri = URI(raw)
+        hostname = uri.hostname
+        site_url = raw.end_with?('/') ? raw : "#{raw}/"
+      else
+        hostname = raw.chomp('/')
+        site_url = "sc-domain:#{hostname}"
+      end
+
+      https_origin = "https://#{hostname}"
+      [hostname, site_url, https_origin]
+    end
+
+    def self.require_target!(target, example, options = {})
+      return if target && !target.empty?
+
+      if options[:json]
+        puts JSON.pretty_generate({ error: 'Target URL is required', example: "gsc #{example}" })
+      else
+        puts Color.c("❌ Error: Please provide a URL target.", Color::RED)
+        puts "Example: gsc #{example}"
+      end
+      exit 1
+    end
+
+    def self.simulate_dry_run?(options)
+      if options[:dry_run]
+        puts Color.c('⚠️ [DRY-RUN] Request simulated. No live API call made.', Color::YELLOW) unless options[:json]
+        true
+      else
+        false
+      end
+    end
+
+    def self.print_batch_summary(success, fail, total)
+      puts "\n#{Color::BOLD}══════════════════════════════════════════════════════════════#{Color::RESET}"
+      puts "#{Color::BOLD}🎉 BATCH INDEXATION COMPLETE#{Color::RESET}"
+      puts "   ✅ Successfully Submitted: #{Color.c(success.to_s, Color::GREEN, Color::BOLD)} / #{total}"
+      puts "   ❌ Failed Requests:        #{Color.c(fail.to_s, Color::RED, Color::BOLD)}" if fail > 0
+      puts "#{Color::BOLD}══════════════════════════════════════════════════════════════#{Color::RESET}\n"
+    end
+
+    def self.write_csv(path, headers, rows)
+      File.open(path, 'w') do |f|
+        f.puts headers.join(',')
+        rows.each do |row|
+          escaped = row.map { |v| "\"#{v.to_s.gsub('"', '""')}\"" }
+          f.puts escaped.join(',')
+        end
+      end
+    end
+
+    def self.print_setup_instructions
+      puts Color.c("\n❌ Error: Google Service Account Key JSON not found!\n", Color::RED, Color::BOLD)
+      puts <<~SETUP
+        #{Color::BOLD}QUICK SETUP GUIDE (2 Minutes):#{Color::RESET}
+
+        #{Color::CYAN}1. Google Cloud Console:#{Color::RESET}
+           • Go to: https://console.cloud.google.com/
+           • In 'APIs & Services' > 'Library', enable:
+             - #{Color::BOLD}Web Search Indexing API#{Color::RESET}
+             - #{Color::BOLD}Google Search Console API#{Color::RESET}
+           • In 'IAM & Admin' > 'Service Accounts', create a service account.
+           • Click the service account > 'Keys' > 'Add Key' > 'Create new key' > 'JSON'.
+           • Download the key.
+
+        #{Color::CYAN}2. Run 1-Click Connect:#{Color::RESET}
+           • Run: #{Color.c('gsc connect', Color::GREEN, Color::BOLD)}
+           • It will automatically find the key in Downloads or let you drag & drop it!
+
+        #{Color::CYAN}3. Google Search Console Permissions:#{Color::RESET}
+           • Copy your Service Account email (shown during gsc connect).
+           • Go to: https://search.google.com/search-console/
+           • Select your property > 'Settings' > 'Users and permissions'.
+           • Click #{Color::BOLD}'Add User'#{Color::RESET} with permission #{Color::BOLD}Owner#{Color::RESET}.
+
+        Then re-run: #{Color::BOLD}gsc domains#{Color::RESET} to verify!
+      SETUP
+    end
+
+    def self.print_commands_help
+      puts <<~COMMANDS
+
+        #{Color::BOLD}SETUP, CONFIGURATION & DOMAIN SWITCHING:#{Color::RESET}
+          #{Color.c('connect', Color::GREEN)}                       1-Click Setup Wizard: auto-detects key or drag & drop
+          #{Color.c('open', Color::GREEN)}                          Reveal config folder (~/.config/gsc) in Finder
+          #{Color.c('use <domain>', Color::GREEN)}                 Set default active domain (saved in ~/.config/gsc/config.json)
+          #{Color.c('where', Color::GREEN)}                        Show CLI location, active credentials, and config path
+          #{Color.c('config', Color::GREEN)}                       View or update current CLI configuration
+          #{Color.c('domains', Color::GREEN)}                      List all verified Search Console properties (highlights active)
+          #{Color.c('version', Color::GREEN)}                      Show CLI version and runtime environment
+          #{Color.c('update', Color::GREEN)}                       Fetch latest version from GitHub and self-update
+
+        #{Color::BOLD}SEARCH ANALYTICS & MONITORING:#{Color::RESET}
+          #{Color.c('top-queries', Color::YELLOW)}                  Top search queries, impressions, CTR, and average rankings
+          #{Color.c('top-pages', Color::YELLOW)}                    Top indexed pages driving clicks & impressions
+          #{Color.c('performance', Color::YELLOW)}                  Aggregated Search Console performance summary (Clicks, Imp, CTR, Pos)
+          #{Color.c('audit', Color::CYAN)}                        Automated 4-step SEO & Indexing Health Check
+
+        #{Color::BOLD}INDEXING & SITEMAP COMMANDS:#{Color::RESET}
+          #{Color.c('index <url>', Color::GREEN)}                  Notify Googlebot to crawl/index a URL (URL_UPDATED)
+          #{Color.c('remove <url>', Color::GREEN)}                 Notify Googlebot a URL has been deleted (URL_DELETED)
+          #{Color.c('status <url>', Color::GREEN)}                 Check Google Indexing API metadata for a URL
+          #{Color.c('inspect <url>', Color::CYAN)}                Live Search Console URL inspection (coverage, canonical, crawl date)
+          #{Color.c('inspect-sitemap [path|url]', Color::CYAN)}  Bulk inspect all sitemap URLs & generate health report
+          #{Color.c('index-sitemap [path|url]', Color::GREEN)}    Submit all URLs in an XML sitemap for batch indexing
+          #{Color.c('sitemaps-list', Color::MAGENTA)}                List submitted sitemaps in Search Console & status
+          #{Color.c('sitemaps-submit <url>', Color::MAGENTA)}        Submit / re-submit an XML sitemap to Search Console
+
+        #{Color::BOLD}AGENT & PROGRAMMATIC INTEGRATION:#{Color::RESET}
+          #{Color.c('skills [install|show]', Color::CYAN)}        Inspect, install, or export the AI Agent Skill
+          #{Color.c('-j, --json', Color::CYAN)}                   Machine-readable JSON output for all commands
+
+        #{Color::BOLD}EXAMPLES:#{Color::RESET}
+          gsc connect                                  # Interactive 1-click setup
+          gsc use example.com                          # Set default domain
+          gsc top-queries                              # Uses default domain automatically
+          gsc inspect https://example.com/pricing      # Live Google index check
+          gsc index https://example.com/blog/new-post  # Instant Googlebot crawl ping
+          gsc audit                                    # Full 4-step SEO audit for domain
+          gsc open                                     # Open config in Finder
+      COMMANDS
+    end
+  end
+end
+
+GSC::CLI.run if __FILE__ == $PROGRAM_NAME
