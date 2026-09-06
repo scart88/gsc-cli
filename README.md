@@ -225,7 +225,7 @@ chmod +x bin/gsc
 ## 🙏 Acknowledgments & Credits
 
 - **Companion Growth Skills**: The companion SEO & marketing skills (`ai-seo`, `seo-audit`, `schema`, `programmatic-seo`, `copywriting`, `cro`) are adapted from the open-source [marketingskills](https://github.com/coreyhaines31/marketingskills) repository by [Corey Haines](https://github.com/coreyhaines31) (MIT License). If you're looking for the full 50-skill marketing suite (covering paid ads, outbound, email sequences, and more), be sure to check out his repository!
-- **Ruby Community**: Inspired by Ben Sheldon and the Rails performance community's passion for lean, zero-dependency, server-side tools.
+- **Ruby Community**: Inspired by [Ben Sheldon](https://github.com/bensheldon) and the Rails performance community's passion for lean, zero-dependency, server-side tools.
 
 ---
 
