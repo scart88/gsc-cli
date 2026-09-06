@@ -75,6 +75,15 @@ Verify your access:
 gsc domains
 ```
 
+### Step 4 (Optional): Link Google Analytics 4 (GA4)
+To enable bounce rate audits and GSC-to-GA4 on-site behavioral correlation:
+1. In [Google Cloud Console](https://console.cloud.google.com/), enable **Google Analytics Data API** and **Google Analytics Admin API**.
+2. In [Google Analytics](https://analytics.google.com/) > **Admin > Property Access Management**, add your service account email with **Viewer** role.
+3. Link your GA4 Property ID to your active domain:
+   ```bash
+   gsc config set-ga4 <property_id>
+   ```
+
 ---
 
 ## 🛠️ CLI Usage & Commands
@@ -112,11 +121,80 @@ gsc top-queries --days 90 --limit 20
 gsc top-pages -s imp
 gsc top-pages -s clicks --days 30
 
-# 30-day aggregated performance summary (Total Clicks, Imp, CTR, Avg Pos)
+# 360° Executive dashboard (Totals, Devices, Countries, Snippets, Queries, Pages, Cities)
 gsc performance
+
+# Multi-dimensional traffic breakdowns:
+gsc devices                  # Desktop vs Mobile vs Tablet click share and CTR
+gsc countries --limit 20     # Top countries with ISO flags, CTR, and SERP positions
+gsc cities --limit 20        # Top visitor cities and behavioral retention (via GA4)
+gsc snippets                 # Rich snippet appearances (Reviews, Products, FAQs)
 
 # Export ranking report directly to CSV
 gsc top-queries --csv rankings.csv
+```
+
+### 🎯 Enterprise Growth & Audit Intelligence
+Enterprise SEO platforms (Botify, Ahrefs, Semrush) charge $1k+/mo for these diagnostics. `gsc` calculates them directly from Google's 1st-party ground truth:
+
+```bash
+# 1. Striking-Distance Keyword Opportunities (Page 2 queries to push to Top 3)
+gsc opportunities --min-imp 10
+# Calculates exact position, current CTR, and projected +clicks/mo if moved to Top 3
+
+# 2. CTR Underperformers (Top 10 keywords with below-expected CTR)
+gsc underperformers
+# Compares actual CTR to Google SERP click benchmarks — rewrite <title> tags to double clicks
+
+# 3. Keyword Cannibalization Conflicts
+gsc cannibalization
+# Detects queries where 2+ URLs on your site fight for rank and split impressions
+
+# 4. Period-over-Period Ranking & Traffic Decay
+gsc decay --compare 28
+# Analyzes 28d vs prior 28d trends: Decaying, Surging, New Breakouts, and Lost queries
+
+# 5. Zombie Pages & Index Bloat Scanner
+gsc zombies https://example.com/sitemap.xml
+# Cross-references sitemap against 90-day impressions to find crawl-budget waste
+```
+
+### Google Analytics 4 (GA4) & Post-Click Behavioral Intelligence
+Search Console measures **Pre-Click SERP rankings**, while GA4 measures **Post-Click on-site visitor retention**. `gsc` bridges them per domain:
+
+```bash
+# 1. Discover all GA4 properties accessible by your Service Account
+gsc ga4-properties
+
+# 2. Link a GA4 Property ID to the active domain (stored in ~/.config/gsc/config.json)
+gsc config set-ga4 123456789
+
+# 3. Landing page bounce rates, engagement rates, sessions, and avg time on page
+gsc ga4
+gsc ga4 --organic                 # Filter to organic search traffic only
+gsc ga4 -s bounce                 # Sort by highest bounce rate
+gsc ga4 -s duration               # Sort by longest average duration
+
+# 5. Live active visitor streaming in real-time
+gsc realtime
+gsc realtime --watch 5
+
+# 6. Google Ads campaign performance (clicks, cost, CPC, conversions, CPA)
+gsc ads
+gsc ads --days 30 --csv ads_performance.csv
+
+# 7. Omnichannel traffic acquisition breakdown (Organic, Paid, Direct, Referral)
+gsc channels
+gsc channels --days 30 --csv traffic_channels.csv
+
+# 4. The Golden Intersection: Correlate GSC search rankings with GA4 bounce rates
+gsc correlation
+# Joins GSC clicks, impressions, and SERP position with GA4 sessions and bounce rates
+# Automatically diagnoses:
+#   HIGH BOUNCE   -> High search clicks but >70% bounce (intent mismatch / slow LCP)
+#   HIDDEN GEM    -> Low rank (pos >7) but exceptional visitor stickiness (needs SEO push)
+#   TRACKING GAP  -> High GSC clicks but low recorded GA4 sessions (broken tag / redirect drop)
+#   WINNER        -> Top 5 rankings with high CTR and low bounce rate
 ```
 
 ### Instant Googlebot Crawl Notifications
@@ -143,7 +221,7 @@ gsc inspect-sitemap https://example.com/sitemap.xml
 # Bulk submit all URLs in an XML sitemap for priority indexing
 gsc index-sitemap https://example.com/sitemap.xml
 
-# Full automated 4-step SEO & Indexing audit
+# Full automated 5-step SEO & GA4 health audit
 gsc audit
 ```
 

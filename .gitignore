@@ -1,7 +1,10 @@
 # Google service account keys (CRITICAL: never commit credentials)
 *service-account*.json
 *credentials*.json
+*gsc*.json
+*-*-[0-9a-f]*.json
 *.key
+*.json.key
 
 # Exports and data
 *.csv

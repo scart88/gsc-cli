@@ -26,9 +26,11 @@
 # STEP 1: Google Cloud Console Setup
 #   1. Go to Google Cloud Console: https://console.cloud.google.com/
 #   2. Create a new project (or select an existing one).
-#   3. Go to "APIs & Services" > "Library" and enable both:
+#   3. Go to "APIs & Services" > "Library" and enable:
 #      - "Web Search Indexing API"
 #      - "Google Search Console API"
+#      - "Google Analytics Data API"
+#      - "Google Analytics Admin API"
 #   4. Go to "IAM & Admin" > "Service Accounts":
 #      - Click "+ CREATE SERVICE ACCOUNT" (e.g. name: "gsc-indexer").
 #      - Click "Done" (no Google Cloud IAM roles required).
@@ -67,10 +69,20 @@
 #   gsc inspect-sitemap [sitemap]        - Bulk inspect sitemap URLs & report health
 #   gsc top-pages [--days 30]            - Top indexed pages driving impressions/clicks
 #   gsc top-queries [--days 30]          - Top search queries, CTR, and average position
+#   gsc opportunities [--min-imp 10]     - Striking-distance keywords (Pos 7–20) to push to Top 3
+#   gsc underperformers [--min-imp 15]   - Top 10 keywords with low CTR (easy title & meta hook wins)
+#   gsc cannibalization                  - Detect multiple URLs competing for the same query
+#   gsc decay [--compare 28]             - Period-over-period trend analysis (Decaying vs Surging)
+#   gsc zombies [sitemap]                - Identify zero-impression pages wasting crawl budget
 #   gsc performance [--days 30]          - Aggregated Search Console performance summary
 #   gsc sitemaps-list [-d <domain>]      - List registered sitemaps in Search Console
 #   gsc sitemaps-submit <sitemapUrl>     - Register / submit an XML sitemap to GSC
-#   gsc audit [-d <domain>]              - Run automated 4-step SEO & indexing check
+#   gsc audit [-d <domain>]              - Run automated 5-step SEO & indexing check
+#   gsc realtime [--watch]               - Real-time active visitors, pages, and countries
+#   gsc ads [--days 30]                  - Google Ads campaign performance (Clicks, Cost, Conv)
+#   gsc channels [--days 30]             - Omnichannel traffic sources breakdown (Organic, Paid, Direct)
+#   gsc ga4 [--organic]                  - Landing page bounce rates, engagement, and duration
+#   gsc correlation [--organic]          - Correlate pre-click GSC ranks with post-click GA4 bounce
 #
 # Options:
 #   -d, --domain <domain>   Target domain (overrides current default domain)
@@ -81,6 +93,10 @@
 #   -s, --sort <field>      Sort analytics by: clicks, impressions (imp), position (pos), ctr
 #       --order <dir>       Sort direction: asc or desc
 #       --asc / --desc      Direction shortcuts (default: asc for pos, desc for clicks/imp/ctr)
+#       --min-imp <n>       Minimum impressions threshold (default: 10)
+#       --min-pos <pos>     Minimum position for opportunity filtering (default: 7.0)
+#       --max-pos <pos>     Maximum position for opportunity filtering (default: 20.0)
+#       --compare <days>    Comparison window in days for decay/trends (default: 28)
 #       --csv <path>        Export analytics or inspection results to a CSV file
 #       --delay <ms>        Delay between sequential API requests in ms (default: 120ms)
 #       --dry-run           Simulate execution without sending API mutations
@@ -133,9 +149,11 @@ module GSC
 
     def self.save(data)
       FileUtils.mkdir_p(CONFIG_DIR)
+      File.chmod(0700, CONFIG_DIR) rescue nil
       existing = load
       updated = existing.merge(data)
       File.write(CONFIG_FILE, JSON.pretty_generate(updated))
+      File.chmod(0600, CONFIG_FILE) rescue nil
       updated
     end
 
@@ -158,6 +176,42 @@ module GSC
       save('key_path' => resolved)
       resolved
     end
+
+    def self.ga4_properties
+      load['ga4_properties'] || {}
+    end
+
+    def self.ga4_property_id(domain = nil)
+      dom = domain || default_domain
+      return load['ga4_property_id'] unless dom
+      clean = dom.to_s.sub(%r{^https?://}, '').sub(/^sc-domain:/, '').chomp('/')
+      ga4_properties[clean] || load['ga4_property_id']
+    end
+
+    def self.set_ga4_property_id(property_id, domain = nil)
+      dom = domain || default_domain
+      clean = dom ? dom.to_s.sub(%r{^https?://}, '').sub(/^sc-domain:/, '').chomp('/') : nil
+      clean_id = property_id.to_s.strip.sub(%r{^properties/}, '')
+
+      if clean
+        props = ga4_properties.dup
+        props[clean] = clean_id
+        save('ga4_properties' => props)
+      else
+        save('ga4_property_id' => clean_id)
+      end
+      clean_id
+    end
+
+    def self.unlink_ga4_property(domain = nil)
+      dom = domain || default_domain
+      return unless dom
+      clean = dom.to_s.sub(%r{^https?://}, '').sub(/^sc-domain:/, '').chomp('/')
+      props = ga4_properties.dup
+      removed = props.delete(clean)
+      save('ga4_properties' => props)
+      removed
+    end
   end
 
   # OAuth2 JWT Token Generator using pure OpenSSL (No external JWT gem needed)
@@ -167,7 +221,8 @@ module GSC
     SCOPES = [
       'https://www.googleapis.com/auth/indexing',
       'https://www.googleapis.com/auth/webmasters',
-      'https://www.googleapis.com/auth/webmasters.readonly'
+      'https://www.googleapis.com/auth/webmasters.readonly',
+      'https://www.googleapis.com/auth/analytics.readonly'
     ].freeze
 
     def self.find_key(custom_path = nil)
@@ -186,7 +241,7 @@ module GSC
         File.expand_path('~/.gsc-service-account.json')
       ].compact
 
-      candidates.find do |path|
+      found = candidates.find do |path|
         next false unless File.file?(path)
 
         begin
@@ -196,6 +251,17 @@ module GSC
           false
         end
       end
+
+      if found
+        dir = File.dirname(File.expand_path(found))
+        is_git = File.exist?(File.join(dir, '.git')) || File.exist?(File.join(File.dirname(dir), '.git'))
+        if is_git && !found.start_with?(Config::CONFIG_DIR)
+          warn Color.c("⚠️  Security Warning: Service account key is stored in a Git repository (#{found}).", Color::YELLOW)
+          warn Color.c("   Run 'gsc connect' or move key to ~/.config/gsc/ to avoid accidental credential commits.\n", Color::YELLOW)
+        end
+      end
+
+      found
     end
 
     def self.fetch_access_token(service_account)
@@ -347,6 +413,204 @@ module GSC
     def submit_sitemap(site_url, feedpath)
       @client.put("https://searchconsole.googleapis.com/webmasters/v3/sites/#{URI.encode_www_form_component(site_url)}/sitemaps/#{URI.encode_www_form_component(feedpath)}")
     end
+
+    # Helper to construct GA4 dimension filters (e.g. hostName isolation, organic traffic)
+    def build_ga4_filter(hostname: nil, organic_only: false, site_only: false)
+      filters = []
+      if hostname && !hostname.empty?
+        clean_host = hostname.to_s.sub(%r{^https?://}, '').sub(/^sc-domain:/, '').sub(/^www\./, '').chomp('/')
+        escaped_host = Regexp.escape(clean_host)
+
+        match_val = if site_only
+          "^(www\\.)?#{escaped_host}$"
+        else
+          "(^|.*\\.)#{escaped_host}$"
+        end
+
+        filters << {
+          filter: {
+            fieldName: 'hostName',
+            stringFilter: {
+              matchType: 'FULL_REGEXP',
+              value: match_val
+            }
+          }
+        }
+      end
+
+      if organic_only
+        filters << {
+          filter: {
+            fieldName: 'sessionMedium',
+            stringFilter: {
+              matchType: 'EXACT',
+              value: 'organic'
+            }
+          }
+        }
+      end
+
+      if filters.size == 1
+        filters.first
+      elsif filters.size > 1
+        { andGroup: { expressions: filters } }
+      end
+    end
+
+    # Google Analytics 4 Data API (runReport)
+    def query_ga4_report(property_id, days: 30, limit: 100, organic_only: false, hostname: nil, site_only: false)
+      clean_id = property_id.to_s.sub(%r{^properties/}, '')
+      endpoint = "https://analyticsdata.googleapis.com/v1beta/properties/#{clean_id}:runReport"
+
+      body = {
+        dateRanges: [{ startDate: "#{days}daysAgo", endDate: 'yesterday' }],
+        dimensions: [{ name: 'pagePath' }],
+        metrics: [
+          { name: 'sessions' },
+          { name: 'activeUsers' },
+          { name: 'engagementRate' },
+          { name: 'bounceRate' },
+          { name: 'averageSessionDuration' },
+          { name: 'screenPageViews' }
+        ],
+        limit: limit
+      }
+
+      filter = build_ga4_filter(hostname: hostname, organic_only: organic_only, site_only: site_only)
+      body[:dimensionFilter] = filter if filter
+
+      @client.post(endpoint, body)
+    end
+
+    # Google Analytics Admin API (accountSummaries)
+    def list_ga4_summaries
+      @client.get('https://analyticsadmin.googleapis.com/v1beta/accountSummaries')
+    end
+
+    # Google Analytics 4 Realtime API (runRealtimeReport)
+    def query_ga4_realtime(property_id, limit: 30)
+      clean_id = property_id.to_s.sub(%r{^properties/}, '')
+      endpoint = "https://analyticsdata.googleapis.com/v1beta/properties/#{clean_id}:runRealtimeReport"
+
+      body = {
+        dimensions: [
+          { name: 'unifiedScreenName' },
+          { name: 'country' }
+        ],
+        metrics: [
+          { name: 'activeUsers' }
+        ],
+        metricAggregations: ['TOTAL'],
+        limit: limit
+      }
+
+      @client.post(endpoint, body)
+    end
+
+    # Google Analytics 4 Page Title to URL Path resolution map
+    def query_ga4_title_map(property_id, days: 30, hostname: nil, site_only: false)
+      clean_id = property_id.to_s.sub(%r{^properties/}, '')
+      endpoint = "https://analyticsdata.googleapis.com/v1beta/properties/#{clean_id}:runReport"
+
+      body = {
+        dateRanges: [{ startDate: "#{days}daysAgo", endDate: 'today' }],
+        dimensions: [{ name: 'pageTitle' }, { name: 'pagePath' }],
+        metrics: [{ name: 'screenPageViews' }],
+        limit: 250
+      }
+
+      filter = build_ga4_filter(hostname: hostname, site_only: site_only)
+      body[:dimensionFilter] = filter if filter
+
+      res = @client.post(endpoint, body)
+      map = {}
+      if res[:ok]
+        (res[:data]['rows'] || []).each do |r|
+          title = r.dig('dimensionValues', 0, 'value')
+          path  = r.dig('dimensionValues', 1, 'value')
+          map[title] ||= path if title && path
+        end
+      end
+      map
+    rescue StandardError
+      {}
+    end
+
+    # Google Analytics 4 Google Ads Report
+    def query_ga4_ads(property_id, days: 30, limit: 50)
+      clean_id = property_id.to_s.sub(%r{^properties/}, '')
+      endpoint = "https://analyticsdata.googleapis.com/v1beta/properties/#{clean_id}:runReport"
+
+      body = {
+        dateRanges: [{ startDate: "#{days}daysAgo", endDate: 'yesterday' }],
+        dimensions: [
+          { name: 'sessionGoogleAdsCampaignName' },
+          { name: 'sessionGoogleAdsAdGroupName' }
+        ],
+        metrics: [
+          { name: 'advertiserAdClicks' },
+          { name: 'advertiserAdCost' },
+          { name: 'advertiserAdCostPerClick' },
+          { name: 'sessions' },
+          { name: 'conversions' },
+          { name: 'bounceRate' }
+        ],
+        limit: limit
+      }
+
+      @client.post(endpoint, body)
+    end
+
+    # Google Analytics 4 Omnichannel Traffic Acquisition Report
+    def query_ga4_channels(property_id, days: 30, limit: 25, hostname: nil, site_only: false)
+      clean_id = property_id.to_s.sub(%r{^properties/}, '')
+      endpoint = "https://analyticsdata.googleapis.com/v1beta/properties/#{clean_id}:runReport"
+
+      body = {
+        dateRanges: [{ startDate: "#{days}daysAgo", endDate: 'yesterday' }],
+        dimensions: [
+          { name: 'sessionDefaultChannelGroup' },
+          { name: 'sessionSourceMedium' }
+        ],
+        metrics: [
+          { name: 'sessions' },
+          { name: 'totalUsers' },
+          { name: 'engagementRate' },
+          { name: 'bounceRate' },
+          { name: 'averageSessionDuration' },
+          { name: 'conversions' }
+        ],
+        limit: limit
+      }
+
+      filter = build_ga4_filter(hostname: hostname, site_only: site_only)
+      body[:dimensionFilter] = filter if filter
+
+      @client.post(endpoint, body)
+    end
+
+    # Google Analytics 4 Geographic Cities Report
+    def query_ga4_cities(property_id, days: 30, limit: 10, hostname: nil, site_only: false)
+      clean_id = property_id.to_s.sub(%r{^properties/}, '')
+      endpoint = "https://analyticsdata.googleapis.com/v1beta/properties/#{clean_id}:runReport"
+
+      body = {
+        dateRanges: [{ startDate: "#{days}daysAgo", endDate: 'yesterday' }],
+        dimensions: [{ name: 'city' }, { name: 'country' }],
+        metrics: [
+          { name: 'sessions' },
+          { name: 'bounceRate' },
+          { name: 'averageSessionDuration' }
+        ],
+        orderBys: [{ metric: { metricName: 'sessions' }, desc: true }],
+        limit: limit
+      }
+
+      filter = build_ga4_filter(hostname: hostname, site_only: site_only)
+      body[:dimensionFilter] = filter if filter
+
+      @client.post(endpoint, body)
+    end
   end
 
   # XML Sitemap Parser supporting local files, remote URLs, and nested sitemap indexes
@@ -354,7 +618,11 @@ module GSC
     def self.fetch_content(path_or_url)
       if path_or_url.start_with?('http://', 'https://')
         uri = URI(path_or_url)
-        res = Net::HTTP.get_response(uri)
+        http = Net::HTTP.new(uri.host, uri.port)
+        http.use_ssl = (uri.scheme == 'https')
+        http.open_timeout = 10
+        http.read_timeout = 20
+        res = http.get(uri.request_uri)
         raise "HTTP #{res.code} fetching sitemap: #{path_or_url}" unless res.is_a?(Net::HTTPSuccess)
         res.body
       else
@@ -394,6 +662,10 @@ module GSC
         puts "📑 Found #{sitemap_locs.size} nested sitemaps in index..." unless quiet
         sitemap_locs.each do |child_url|
           child_url = child_url.strip
+          unless child_url.start_with?('http://', 'https://')
+            puts Color.c("   ⚠️ Skipping non-HTTP child sitemap location: #{child_url}", Color::YELLOW) unless quiet
+            next
+          end
           puts "   ↳ Loading child sitemap: #{child_url}" unless quiet
           begin
             child_xml = fetch_content(child_url)
@@ -412,7 +684,7 @@ module GSC
 
   # CLI Command Runner
   class CLI
-    VERSION = '1.4.0'
+    VERSION = '1.8.0'
     DEFAULT_UPDATE_URL = 'https://raw.githubusercontent.com/scart88/gsc-cli/main/bin/gsc'
 
     BANNER = <<~BANNER
@@ -433,9 +705,13 @@ module GSC
 
       ## Key Capabilities
       - **Search Analytics**: Query real keyword rankings, impressions, clicks, CTR, and average SERP positions.
+      - **Growth Intelligence**: Uncover striking-distance Page 2 opportunities, CTR underperformers, and keyword cannibalization conflicts.
+      - **Trend & Decay Analysis**: 28-day period-over-period decay detection (decaying, surging, new, lost).
+      - **Crawl Optimization**: Scan sitemaps for 90-day zero-impression zombie pages wasting crawl budget.
       - **Instant Googlebot Indexing**: Ping Google's Indexing API with `URL_UPDATED` or `URL_DELETED` to trigger immediate crawling.
       - **Live URL Inspection**: Query Search Console API for actual index status (`PASS`, coverage state, canonical assigned by Google, crawl date).
       - **Bulk Sitemap Audit**: Inspect entire XML sitemaps to identify indexed vs queued URLs.
+      - **GA4 Behavioral & Realtime**: Live visitor streaming, post-click bounce rates, engagement rates, and Google Ads ROI.
       - **Multi-domain Management**: Easily view or switch active domains across projects.
 
       ---
@@ -445,15 +721,19 @@ module GSC
 
       ```bash
       gsc top-queries --json
+      gsc opportunities --json
       gsc inspect https://example.com/page --json
       gsc performance --days 30 --json
+      gsc realtime --json
+      gsc ads --json
+      gsc channels --json
       ```
 
       ---
 
       ## Common Agent Workflows
 
-      ### 1. Analyzing Keyword Rankings & SEO Opportunities
+      ### 1. Analyzing Keyword Rankings & Opportunities
       When the user asks about traffic, rankings, or keyword performance:
       ```bash
       # Get top 20 queries for the active domain (sorted by impressions)
@@ -462,14 +742,43 @@ module GSC
       # Find highest-ranking queries (page 1 rankings, pos ascending)
       gsc top-queries -s pos --limit 20 --json
 
-      # Get queries for a specific domain over the past 90 days
-      gsc top-queries -d example.com --days 90 --limit 50 --json
+      # Find striking-distance opportunities (Page 2 keywords to push to Top 3)
+      gsc opportunities --min-imp 10 --json
+
+      # Find Top 10 queries with low CTR (easy title tag rewrites)
+      gsc underperformers --json
+
+      # Detect multiple URLs competing for the same search query
+      gsc cannibalization --json
+
+      # Detect traffic drops and ranking decay
+      gsc decay --json
       ```
       **Interpretation Advice**:
       - Sort queries by impressions to find high-volume search terms.
-      - Look for queries with position 4–15 with high impressions — these are prime candidates for on-page content optimization to push them into the top 3.
+      - Striking-distance keywords (position 7–20 with high impressions) are prime candidates for on-page content expansion to push them into Top 3.
+      - CTR underperformers already rank on Page 1—simply rewrite their `<title>` and meta description with emotional hooks or benefit promises to double traffic.
 
-      ### 2. Inspecting Page Index Status
+      ### 2. Multi-Dimensional Performance & Geographic Analytics
+      When the user asks for high-level performance, devices, country breakdown, or search appearances:
+      ```bash
+      # Full 360° executive dashboard (Totals, Devices, Countries, Snippets, Queries, Pages, Cities)
+      gsc performance --days 30 --json
+
+      # Device breakdown (Desktop vs Mobile vs Tablet clicks share)
+      gsc devices --json
+
+      # Top countries driving organic search impressions & clicks
+      gsc countries --limit 20 --json
+
+      # Top visitor cities and on-site engagement (via GA4)
+      gsc cities --limit 20 --json
+
+      # Search appearance & rich snippets (Review stars, Product snippets, FAQ rich results)
+      gsc snippets --json
+      ```
+
+      ### 3. Inspecting Page Index Status
       When the user asks if a specific URL is indexed or why it's not showing up on Google:
       ```bash
       gsc inspect https://example.com/features/new-feature --json
@@ -505,11 +814,30 @@ module GSC
       gsc use example.com --json
       ```
 
+      ### 6. GA4 Behavioral, Realtime & Google Ads Analytics
+      ```bash
+      # Stream live active visitors on site right now
+      gsc realtime --json
+
+      # Top landing pages with bounce rates, duration, and engagement
+      gsc ga4 --organic --json
+
+      # Correlate pre-click GSC search queries with post-click GA4 bounce rates
+      gsc correlation --json
+
+      # Google Ads campaign performance (clicks, cost, CPC, conversions, CPA)
+      gsc ads --json
+
+      # Omnichannel traffic sources breakdown (Organic, Paid, Direct, Referral)
+      gsc channels --json
+      ```
+
       ---
 
       ## Error Handling & Onboarding
       - If `gsc` returns an error about missing credentials: Direct the user to run `gsc connect` in their terminal (which automatically scans `~/Downloads` for service account JSON keys or accepts a drag-and-drop), or run `gsc open` to reveal `~/.config/gsc/` in Finder.
-      - If `gsc` returns an error about permission restricted: Ensure the service account email is added as an **Owner** in Google Search Console Settings -> Users and permissions.
+      - If `gsc` returns an error about permission restricted in Search Console: Ensure the service account email is added as an **Owner** in Google Search Console Settings -> Users and permissions.
+      - If `gsc` returns a 403 error for Google Analytics: Open Google Analytics (Admin > Account Access Management or Property Access Management), click '+', paste the service account email, and assign the **Viewer** role.
     SKILL
 
     def self.run(argv = ARGV)
@@ -522,10 +850,19 @@ module GSC
         limit: 50,
         sort: nil,
         order: nil,
+        min_imp: 10,
+        min_pos: 7.0,
+        max_pos: 20.0,
+        compare: 28,
         csv: nil,
         delay: 120,
         dry_run: false,
-        json: false
+        json: false,
+        property: nil,
+        organic: false,
+        all_hosts: false,
+        site_only: false,
+        watch: nil
       }
 
       parser = OptionParser.new do |opts|
@@ -567,6 +904,42 @@ module GSC
 
         opts.on('--desc', 'Sort descending (default for clicks, impressions, ctr)') do
           options[:order] = 'desc'
+        end
+
+        opts.on('--min-imp COUNT', Integer, 'Minimum impressions threshold (default: 10)') do |count|
+          options[:min_imp] = count
+        end
+
+        opts.on('--min-pos POS', Float, 'Minimum position for opportunity filtering (default: 7.0)') do |pos|
+          options[:min_pos] = pos
+        end
+
+        opts.on('--max-pos POS', Float, 'Maximum position for opportunity filtering (default: 20.0)') do |pos|
+          options[:max_pos] = pos
+        end
+
+        opts.on('--compare DAYS', Integer, 'Comparison window in days for decay/trends (default: 28)') do |days|
+          options[:compare] = days
+        end
+
+        opts.on('--property ID', 'Explicit GA4 Property ID (overrides domain config)') do |prop|
+          options[:property] = prop
+        end
+
+        opts.on('--organic', 'Filter GA4 analytics to organic search traffic only') do
+          options[:organic] = true
+        end
+
+        opts.on('--all-hosts', 'Do not filter GA4 data by hostname (include cross-domain hosts)') do
+          options[:all_hosts] = true
+        end
+
+        opts.on('--site-only', 'Filter GA4 strictly to apex website pages (exclude subdomains)') do
+          options[:site_only] = true
+        end
+
+        opts.on('-w', '--watch [INTERVAL]', Integer, 'Auto-refresh report in real-time (default: 5s)') do |sec|
+          options[:watch] = sec || 5
         end
 
         opts.on('--csv PATH', 'Export results to a CSV file') do |csv|
@@ -618,6 +991,9 @@ module GSC
         exit 0
       when 'connect', 'setup', 'init', 'install'
         handle_connect_wizard
+        exit 0
+      when 'connect-ga4', 'setup-ga4', 'link-ga4'
+        handle_connect_ga4_wizard(options)
         exit 0
       when 'open'
         handle_open_command
@@ -957,37 +1333,291 @@ module GSC
         end
 
       when 'performance'
-        puts "📈 Calculating Search Console Performance for #{Color.c(site_url, Color::CYAN)} (Past #{options[:days]} days)...\n" unless options[:json]
-        res = api.query_analytics(site_url, days: options[:days], dimensions: [])
-        if res[:ok]
-          row = res.dig(:data, 'rows', 0) || { 'clicks' => 0, 'impressions' => 0, 'ctr' => 0, 'position' => 0 }
-          payload = {
-            clicks: row['clicks'],
-            impressions: row['impressions'],
-            ctr: (row['ctr'] * 100).round(2),
-            position: row['position'].round(1),
-            startDate: res[:start_date],
-            endDate: res[:end_date]
-          }
+        puts "📈 Calculating Search Console & Behavioral Performance for #{Color.c(site_url, Color::CYAN)} (Past #{options[:days]} days)...\n" unless options[:json]
 
-          if options[:json]
-            puts JSON.pretty_generate(payload)
-          else
-            puts "#{Color::BOLD}══════════════════════════════════════════════════════════════#{Color::RESET}"
-            puts "#{Color::BOLD}📊 SEARCH PERFORMANCE TOTALS (#{res[:start_date]} to #{res[:end_date]})#{Color::RESET}"
-            puts "#{Color::BOLD}══════════════════════════════════════════════════════════════#{Color::RESET}"
-            puts "  🔵 Total Clicks:       #{Color.c(row['clicks'].to_s, Color::GREEN, Color::BOLD)}"
-            puts "  🟣 Total Impressions:  #{Color.c(row['impressions'].to_s, Color::MAGENTA, Color::BOLD)}"
-            puts "  🟢 Average CTR:        #{Color.c("#{'%.2f' % (row['ctr'] * 100)}%", Color::CYAN, Color::BOLD)}"
-            puts "  🟠 Average Position:   #{Color.c(('%.1f' % row['position']), Color::YELLOW, Color::BOLD)}"
-            puts "#{Color::BOLD}══════════════════════════════════════════════════════════════#{Color::RESET}\n"
-          end
-        else
+        # 1. Overall Totals
+        res = api.query_analytics(site_url, days: options[:days], dimensions: [])
+        unless res[:ok]
           if options[:json]
             puts JSON.pretty_generate({ error: res[:data] })
           else
             puts Color.c("❌ Performance API Error (#{res[:status]}): #{res[:data]}", Color::RED)
           end
+          return
+        end
+
+        row = res.dig(:data, 'rows', 0) || { 'clicks' => 0, 'impressions' => 0, 'ctr' => 0, 'position' => 0 }
+        total_clicks = row['clicks'] || 0
+        total_imp    = row['impressions'] || 0
+        avg_ctr      = ((row['ctr'] || 0) * 100).round(2)
+        avg_pos      = (row['position'] || 0).round(1)
+
+        # 2. Device Breakdown
+        dev_res = api.query_analytics(site_url, days: options[:days], dimensions: ['device'])
+        devices_data = (dev_res[:ok] ? (dev_res.dig(:data, 'rows') || []) : []).map do |r|
+          c = r['clicks'] || 0
+          i = r['impressions'] || 0
+          ctr = ((r['ctr'] || 0) * 100).round(2)
+          pos = (r['position'] || 0).round(1)
+          share = total_clicks > 0 ? "#{(c.to_f / total_clicks * 100).round(1)}%" : "-"
+          { device: r['keys'].first, clicks: c, impressions: i, ctr: ctr, position: pos, share: share }
+        end.sort_by { |r| -r[:clicks] }
+
+        # 3. Top Countries
+        cntry_limit = (options[:limit] == 50 ? 10 : options[:limit])
+        cntry_res = api.query_analytics(site_url, days: options[:days], dimensions: ['country'], row_limit: [cntry_limit * 3, 50].max)
+        countries_data = (cntry_res[:ok] ? (cntry_res.dig(:data, 'rows') || []) : []).map do |r|
+          {
+            country: r['keys'].first,
+            clicks: r['clicks'] || 0,
+            impressions: r['impressions'] || 0,
+            ctr: ((r['ctr'] || 0) * 100).round(2),
+            position: (r['position'] || 0).round(1)
+          }
+        end.sort_by { |r| [-r[:clicks], -r[:impressions]] }.first(cntry_limit)
+
+        # 4. Search Appearance / Rich Snippets
+        snip_res = api.query_analytics(site_url, days: options[:days], dimensions: ['searchAppearance'], row_limit: 10)
+        snippets_data = (snip_res[:ok] ? (snip_res.dig(:data, 'rows') || []) : []).map do |r|
+          {
+            type: r['keys'].first,
+            clicks: r['clicks'] || 0,
+            impressions: r['impressions'] || 0,
+            ctr: ((r['ctr'] || 0) * 100).round(2),
+            position: (r['position'] || 0).round(1)
+          }
+        end.sort_by { |r| -r[:clicks] }
+
+        # 5. Top Search Queries (Top 5 for dashboard summary)
+        q_res = api.query_analytics(site_url, days: options[:days], dimensions: ['query'], row_limit: 5)
+        queries_data = (q_res[:ok] ? (q_res.dig(:data, 'rows') || []) : []).map do |r|
+          {
+            query: r['keys'].first,
+            clicks: r['clicks'] || 0,
+            impressions: r['impressions'] || 0,
+            ctr: ((r['ctr'] || 0) * 100).round(2),
+            position: (r['position'] || 0).round(1)
+          }
+        end.sort_by { |r| -r[:clicks] }
+
+        # 6. Top Landing Pages (Top 5 for dashboard summary)
+        p_res = api.query_analytics(site_url, days: options[:days], dimensions: ['page'], row_limit: 5)
+        pages_data = (p_res[:ok] ? (p_res.dig(:data, 'rows') || []) : []).map do |r|
+          path = r['keys'].first.sub(%r{^https?://[^/]+}, '')
+          path = '/' if path.empty?
+          {
+            path: path,
+            clicks: r['clicks'] || 0,
+            impressions: r['impressions'] || 0,
+            ctr: ((r['ctr'] || 0) * 100).round(2),
+            position: (r['position'] || 0).round(1)
+          }
+        end.sort_by { |r| -r[:clicks] }
+
+        # 7. GA4 Top Cities (if linked)
+        ga4_property_id = options[:property] || Config.ga4_property_id(hostname)
+        cities_data = []
+        if ga4_property_id
+          ga4_res = api.query_ga4_cities(ga4_property_id, days: options[:days], limit: 8, hostname: (options[:all_hosts] ? nil : hostname), site_only: options[:site_only])
+          if ga4_res[:ok]
+            cities_data = (ga4_res.dig(:data, 'rows') || []).map do |cr|
+              city    = cr.dig('dimensionValues', 0, 'value') || '(unknown)'
+              country = cr.dig('dimensionValues', 1, 'value') || '(unknown)'
+              sess    = (cr.dig('metricValues', 0, 'value') || 0).to_i
+              bounce  = ((cr.dig('metricValues', 1, 'value') || 0).to_f * 100).round(1)
+              dur     = (cr.dig('metricValues', 2, 'value') || 0).to_f.round
+              { city: city, country: country, sessions: sess, bounce_rate: "#{bounce}%", duration: format_duration(dur) }
+            end
+          end
+        end
+
+        if options[:json]
+          payload = {
+            domain: hostname,
+            property: site_url,
+            ga4PropertyId: ga4_property_id,
+            startDate: res[:start_date],
+            endDate: res[:end_date],
+            totals: {
+              clicks: total_clicks,
+              impressions: total_imp,
+              ctr: avg_ctr,
+              position: avg_pos
+            },
+            devices: devices_data,
+            countries: countries_data,
+            snippets: snippets_data,
+            topQueries: queries_data,
+            topPages: pages_data,
+            cities: cities_data
+          }
+          puts JSON.pretty_generate(payload)
+        else
+          puts "#{Color::BOLD}══════════════════════════════════════════════════════════════#{Color::RESET}"
+          puts "#{Color::BOLD}📊 SEARCH PERFORMANCE TOTALS (#{res[:start_date]} to #{res[:end_date]})#{Color::RESET}"
+          puts "#{Color::BOLD}══════════════════════════════════════════════════════════════#{Color::RESET}"
+          puts "  🔵 Total Clicks:       #{Color.c(format_number(total_clicks), Color::GREEN, Color::BOLD)}"
+          puts "  🟣 Total Impressions:  #{Color.c(format_number(total_imp), Color::MAGENTA, Color::BOLD)}"
+          puts "  🟢 Average CTR:        #{Color.c("#{avg_ctr}%", Color::CYAN, Color::BOLD)}"
+          puts "  🟠 Average Position:   #{Color.c(avg_pos.to_s, Color::YELLOW, Color::BOLD)}"
+          puts "#{Color::BOLD}══════════════════════════════════════════════════════════════#{Color::RESET}"
+
+          print_devices_table(devices_data) unless devices_data.empty?
+          print_countries_table(countries_data) unless countries_data.empty?
+          print_snippets_table(snippets_data)
+          print_mini_queries_table(queries_data) unless queries_data.empty?
+          print_mini_pages_table(pages_data) unless pages_data.empty?
+
+          if ga4_property_id && !cities_data.empty?
+            print_cities_table(cities_data, ga4_property_id)
+          elsif !ga4_property_id
+            puts "\n#{Color.c("💡 Link GA4 with `gsc connect-ga4` or `gsc config set-ga4 <id>` to see city-level behavioral data & retention.", Color::GRAY)}"
+          end
+          puts
+        end
+
+      when 'devices'
+        puts "📱 Fetching device breakdown for #{Color.c(site_url, Color::CYAN)} (Past #{options[:days]} days)...\n" unless options[:json]
+        res = api.query_analytics(site_url, days: options[:days], dimensions: ['device'])
+        if res[:ok]
+          tot_res = api.query_analytics(site_url, days: options[:days], dimensions: [])
+          tot_clicks = tot_res.dig(:data, 'rows', 0, 'clicks') || 0
+          rows = (res.dig(:data, 'rows') || []).map do |r|
+            c = r['clicks'] || 0
+            i = r['impressions'] || 0
+            ctr = ((r['ctr'] || 0) * 100).round(2)
+            pos = (r['position'] || 0).round(1)
+            share = tot_clicks > 0 ? "#{(c.to_f / tot_clicks * 100).round(1)}%" : "-"
+            { device: r['keys'].first, clicks: c, impressions: i, ctr: ctr, position: pos, share: share }
+          end.sort_by { |r| -r[:clicks] }
+
+          if options[:json]
+            puts JSON.pretty_generate(rows)
+          elsif rows.empty?
+            puts Color.c("ℹ️ No device data recorded in the last #{options[:days]} days.", Color::YELLOW)
+          else
+            print_devices_table(rows)
+            puts
+            if options[:csv]
+              write_csv(options[:csv], %w[Device Clicks Impressions CTR Position Share], rows.map { |r| [r[:device], r[:clicks], r[:impressions], r[:ctr], r[:position], r[:share]] })
+              puts Color.c("📁 Exported device breakdown to #{options[:csv]}", Color::CYAN)
+            end
+          end
+        else
+          if options[:json]
+            puts JSON.pretty_generate({ error: res[:data] })
+          else
+            puts Color.c("❌ Device API Error (#{res[:status]}): #{res[:data]}", Color::RED)
+          end
+        end
+
+      when 'countries'
+        limit = options[:limit] || 20
+        puts "🌍 Fetching top #{limit} countries for #{Color.c(site_url, Color::CYAN)} (Past #{options[:days]} days)...\n" unless options[:json]
+        res = api.query_analytics(site_url, days: options[:days], dimensions: ['country'], row_limit: limit)
+        if res[:ok]
+          rows = (res.dig(:data, 'rows') || []).map do |r|
+            {
+              country: r['keys'].first,
+              clicks: r['clicks'] || 0,
+              impressions: r['impressions'] || 0,
+              ctr: ((r['ctr'] || 0) * 100).round(2),
+              position: (r['position'] || 0).round(1)
+            }
+          end.sort_by { |r| -r[:clicks] }
+
+          if options[:json]
+            puts JSON.pretty_generate(rows)
+          elsif rows.empty?
+            puts Color.c("ℹ️ No country data recorded in the last #{options[:days]} days.", Color::YELLOW)
+          else
+            print_countries_table(rows)
+            puts
+            if options[:csv]
+              write_csv(options[:csv], %w[Country Clicks Impressions CTR Position], rows.map { |r| [r[:country], r[:clicks], r[:impressions], r[:ctr], r[:position]] })
+              puts Color.c("📁 Exported country breakdown to #{options[:csv]}", Color::CYAN)
+            end
+          end
+        else
+          if options[:json]
+            puts JSON.pretty_generate({ error: res[:data] })
+          else
+            puts Color.c("❌ Country API Error (#{res[:status]}): #{res[:data]}", Color::RED)
+          end
+        end
+
+      when 'snippets', 'appearance', 'search-appearance'
+        puts "✨ Fetching search appearance & rich snippets for #{Color.c(site_url, Color::CYAN)} (Past #{options[:days]} days)...\n" unless options[:json]
+        res = api.query_analytics(site_url, days: options[:days], dimensions: ['searchAppearance'], row_limit: 20)
+        if res[:ok]
+          rows = (res.dig(:data, 'rows') || []).map do |r|
+            {
+              type: r['keys'].first,
+              clicks: r['clicks'] || 0,
+              impressions: r['impressions'] || 0,
+              ctr: ((r['ctr'] || 0) * 100).round(2),
+              position: (r['position'] || 0).round(1)
+            }
+          end.sort_by { |r| -r[:clicks] }
+
+          if options[:json]
+            puts JSON.pretty_generate(rows)
+          else
+            print_snippets_table(rows)
+            puts
+            if options[:csv]
+              write_csv(options[:csv], %w[AppearanceType Clicks Impressions CTR Position], rows.map { |r| [r[:type], r[:clicks], r[:impressions], r[:ctr], r[:position]] })
+              puts Color.c("📁 Exported rich snippets to #{options[:csv]}", Color::CYAN)
+            end
+          end
+        else
+          if options[:json]
+            puts JSON.pretty_generate({ error: res[:data] })
+          else
+            puts Color.c("❌ Search Appearance API Error (#{res[:status]}): #{res[:data]}", Color::RED)
+          end
+        end
+
+      when 'cities'
+        property_id = options[:property] || Config.ga4_property_id(hostname)
+        unless property_id
+          if options[:json]
+            puts JSON.pretty_generate({ error: "No GA4 Property ID linked for #{hostname}. Link with `gsc config set-ga4 <id>` or `gsc connect-ga4`." })
+          else
+            puts Color.c("\n❌ No GA4 Property ID linked for #{hostname}!", Color::RED, Color::BOLD)
+            puts "Link your GA4 property ID using:\n  #{Color.c("gsc connect-ga4", Color::GREEN, Color::BOLD)} (interactive wizard)"
+            puts "  #{Color.c("gsc config set-ga4 <property_id>", Color::CYAN)} (direct link)\n"
+          end
+          return
+        end
+
+        limit = options[:limit] || 20
+        puts "🏙️ Fetching top #{limit} cities for #{Color.c(hostname, Color::CYAN)} [Property #{property_id}] (Past #{options[:days]} days)...\n" unless options[:json]
+        res = api.query_ga4_cities(property_id, days: options[:days], limit: limit, hostname: (options[:all_hosts] ? nil : hostname), site_only: options[:site_only])
+        if res[:ok]
+          rows = (res.dig(:data, 'rows') || []).map do |cr|
+            city    = cr.dig('dimensionValues', 0, 'value') || '(unknown)'
+            country = cr.dig('dimensionValues', 1, 'value') || '(unknown)'
+            sess    = (cr.dig('metricValues', 0, 'value') || 0).to_i
+            bounce  = ((cr.dig('metricValues', 1, 'value') || 0).to_f * 100).round(1)
+            dur     = (cr.dig('metricValues', 2, 'value') || 0).to_f.round
+            { city: city, country: country, sessions: sess, bounce_rate: "#{bounce}%", duration: format_duration(dur) }
+          end
+
+          if options[:json]
+            puts JSON.pretty_generate(rows)
+          elsif rows.empty?
+            puts Color.c("ℹ️ No city data recorded in the last #{options[:days]} days.", Color::YELLOW)
+          else
+            print_cities_table(rows, property_id)
+            puts
+            if options[:csv]
+              write_csv(options[:csv], %w[City Country Sessions BounceRate AvgDuration], rows.map { |r| [r[:city], r[:country], r[:sessions], r[:bounce_rate], r[:duration]] })
+              puts Color.c("📁 Exported city breakdown to #{options[:csv]}", Color::CYAN)
+            end
+          end
+        else
+          handle_ga4_api_error(res, property_id, hostname, options)
         end
 
       when 'sitemaps-list'
@@ -1031,11 +1661,13 @@ module GSC
         puts "🌐 Fetching all Search Console properties accessible by key...\n" unless options[:json]
         res = api.list_sites
         if res[:ok]
-          entries = res.dig(:data, 'siteEntry') || []
+          entries = (res.dig(:data, 'siteEntry') || []).sort_by { |s| s['siteUrl'].sub(%r{^https?://}, '').sub(/^sc-domain:/, '') }
           active_dom = Config.default_domain
           mapped = entries.map do |s|
-            is_active = active_dom && s['siteUrl'].include?(active_dom)
-            s.merge('active' => !!is_active)
+            clean_s_dom = s['siteUrl'].sub(%r{^https?://}, '').sub(/^sc-domain:/, '').chomp('/')
+            is_active = active_dom && (active_dom == clean_s_dom || s['siteUrl'].include?(active_dom))
+            ga4_id = Config.ga4_property_id(clean_s_dom)
+            s.merge('active' => !!is_active, 'ga4PropertyId' => ga4_id, 'cleanDomain' => clean_s_dom)
           end
 
           if options[:json]
@@ -1043,15 +1675,38 @@ module GSC
           elsif entries.empty?
             puts Color.c("⚠️ No Search Console properties found.", Color::YELLOW)
           else
-            puts "#{Color::BOLD}Permission Level  | Site Property Identifier#{Color::RESET}"
-            puts "--------------------------------------------------------------------------------"
-            mapped.each do |s|
+            puts "#{Color::BOLD} #  | Permission Level | Site Property Identifier             | GA4 Link Status#{Color::RESET}"
+            puts "--------------------------------------------------------------------------------------------------"
+            mapped.each_with_index do |s, idx|
+              num_str = Color.c("[#{idx + 1}]".ljust(4), Color::CYAN, Color::BOLD)
               level = (s['permissionLevel'] || 'Unknown').ljust(17)
-              site_str = Color.c(s['siteUrl'], Color::CYAN)
+              site_str = Color.c(s['siteUrl'].ljust(36), Color::CYAN)
+              ga4_str = if s['ga4PropertyId']
+                Color.c("[GA4: #{s['ga4PropertyId']}]", Color::MAGENTA, Color::BOLD)
+              else
+                Color.c("[GA4: Not linked]", Color::GRAY)
+              end
               suffix = s['active'] ? " #{Color.c('👈 [ACTIVE]', Color::GREEN, Color::BOLD)}" : ""
-              puts "#{level} | #{site_str}#{suffix}"
+              puts "#{num_str}| #{level} | #{site_str} | #{ga4_str}#{suffix}"
             end
             puts
+
+            if $stdin.tty? && mapped.any?
+              print "Select domain number (1-#{mapped.size}) to switch active, or press Enter to keep current: "
+              choice = $stdin.gets&.strip
+              if choice && choice =~ /^\d+$/
+                choice_num = choice.to_i
+                if choice_num >= 1 && choice_num <= mapped.size
+                  chosen = mapped[choice_num - 1]
+                  clean = Config.set_default_domain(chosen['cleanDomain'])
+                  puts "\n" + Color.c("✅ Active default domain set to: #{clean}", Color::GREEN, Color::BOLD)
+                  puts Color.c("   Saved to #{Config::CONFIG_FILE}", Color::GRAY)
+                  puts "\nNow all commands will automatically target #{Color.c(clean, Color::CYAN)} without needing -d!\n\n"
+                else
+                  puts Color.c("Invalid selection.", Color::YELLOW)
+                end
+              end
+            end
           end
         else
           if options[:json]
@@ -1062,49 +1717,1245 @@ module GSC
         end
 
       when 'audit'
-        puts "#{Color::BOLD}🚀 RUNNING COMPREHENSIVE SEO & INDEX AUDIT FOR: #{Color.c(hostname, Color::CYAN)}#{Color::RESET}\n" unless options[:json]
-        audit_data = { domain: hostname, siteUrl: site_url }
+        run_comprehensive_audit(api, site_url, hostname, https_origin, options)
 
-        # 1. Check Sites Permission
-        sites_res = api.list_sites
-        access_ok = false
-        if sites_res[:ok]
-          entries = sites_res.dig(:data, 'siteEntry') || []
-          access_ok = entries.any? { |s| s['siteUrl'] == site_url || s['siteUrl'].include?(hostname) }
+      when 'opportunities', 'striking-distance', 'quick-wins'
+        min_pos = options[:min_pos] || 7.0
+        max_pos = options[:max_pos] || 20.0
+        min_imp = options[:min_imp] || 10
+        puts "🎯 Finding striking-distance keyword opportunities for #{Color.c(site_url, Color::CYAN)} (Positions #{min_pos}–#{max_pos}, Min #{min_imp} Imp)...\n" unless options[:json]
+
+        res = api.query_analytics(site_url, days: options[:days], dimensions: %w[query page], row_limit: 2500)
+        if res[:ok]
+          raw_rows = res.dig(:data, 'rows') || []
+          opportunities = []
+
+          raw_rows.each do |r|
+            q = r['keys'][0]
+            p = r['keys'][1]
+            pos = r['position'].round(1)
+            imp = r['impressions']
+            clicks = r['clicks']
+            ctr = (r['ctr'] * 100).round(2)
+
+            next unless pos >= min_pos && pos <= max_pos
+            next unless imp >= min_imp
+
+            target_ctr = 12.0
+            potential_clicks = [((imp * (target_ctr / 100.0)) - clicks).round, 1].max
+            score = (potential_clicks * (1.0 / [pos - 2.0, 1.0].max) * 10.0).round(1)
+
+            opportunities << {
+              query: q,
+              page: p,
+              position: pos,
+              impressions: imp,
+              clicks: clicks,
+              ctr: ctr,
+              potentialGain: potential_clicks,
+              opportunityScore: score
+            }
+          end
+
+          opportunities.sort_by! { |o| -o[:opportunityScore] }
+          opportunities = opportunities.first(options[:limit])
+
+          if options[:json]
+            puts JSON.pretty_generate(opportunities)
+          elsif opportunities.empty?
+            puts Color.c("ℹ️ No striking-distance opportunities found with current filters (Min #{min_imp} imp, Pos #{min_pos}–#{max_pos}).", Color::YELLOW)
+            puts "💡 Tip: Try lowering --min-imp (e.g. gsc opportunities --min-imp 3) or increasing --days 90."
+          else
+            puts "#{Color::BOLD}Pos   | Imp    | Clicks | Est. +Clicks | Target Page & Query#{Color::RESET}"
+            puts "--------------------------------------------------------------------------------"
+            opportunities.each do |opp|
+              pos_str    = opp[:position].to_s.ljust(5)
+              imp_str    = opp[:impressions].to_s.ljust(6)
+              clicks_str = opp[:clicks].to_s.ljust(6)
+              gain_str   = "+#{opp[:potentialGain]}/mo".ljust(12)
+              page_short = opp[:page].sub(%r{^https?://[^/]+}, '')
+              page_short = '/' if page_short.empty?
+
+              puts "#{Color.c(pos_str, Color::YELLOW)} | #{imp_str} | #{clicks_str} | #{Color.c(gain_str, Color::GREEN, Color::BOLD)} | #{Color.c(page_short, Color::CYAN)}"
+              puts "      |        |        |              | ↳ #{Color::BOLD}\"#{opp[:query]}\"#{Color::RESET}"
+            end
+            puts "\n#{Color.c("Total Opportunities: #{opportunities.size}", Color::GRAY)}"
+            puts "💡 #{Color::BOLD}Optimization Playbook:#{Color::RESET} Add an H2 subheading and 1-2 paragraphs directly targeting these queries on their respective pages to push them onto Page 1.\n\n"
+
+            if options[:csv]
+              csv_data = opportunities.map { |o| [o[:query], o[:page], o[:position], o[:impressions], o[:clicks], o[:ctr], o[:potentialGain], o[:opportunityScore]] }
+              write_csv(options[:csv], %w[Query Page Position Impressions Clicks CTR PotentialGain Score], csv_data)
+              puts Color.c("📁 Exported opportunities to #{options[:csv]}", Color::CYAN)
+            end
+          end
+        else
+          if options[:json]
+            puts JSON.pretty_generate({ error: res[:data] })
+          else
+            puts Color.c("❌ Search Analytics Error (#{res[:status]}): #{res[:data]}", Color::RED)
+          end
         end
-        audit_data[:verifiedAccess] = access_ok
-        print "  [1/4] Checking Search Console API Permissions... " unless options[:json]
-        puts access_ok ? Color.c('✅ Verified Access', Color::GREEN) : Color.c("⚠️ Access restricted (#{site_url})", Color::YELLOW) unless options[:json]
 
-        # 2. Fetch Performance
-        perf_res = api.query_analytics(site_url, days: 30)
-        perf_row = perf_res.dig(:data, 'rows', 0) || { 'clicks' => 0, 'impressions' => 0, 'position' => 0 }
-        audit_data[:performance30d] = {
-          clicks: perf_row['clicks'],
-          impressions: perf_row['impressions'],
-          averagePosition: perf_row['position'].round(1)
-        }
-        print "  [2/4] Fetching 30-Day Search Analytics... " unless options[:json]
-        puts Color.c("✅ #{perf_row['clicks']} Clicks, #{perf_row['impressions']} Impressions, Pos #{'%.1f' % perf_row['position']}", Color::GREEN) unless options[:json]
+      when 'underperformers', 'ctr-underperformers', 'ctr-gaps'
+        min_imp = options[:min_imp] || 15
+        puts "⚡ Scanning for CTR Underperformers in Top 10 for #{Color.c(site_url, Color::CYAN)} (Min #{min_imp} Imp)...\n" unless options[:json]
 
-        # 3. Check Sitemaps
-        sm_res = api.list_sitemaps(site_url)
-        sitemaps = sm_res[:ok] ? (sm_res.dig(:data, 'sitemap') || []) : []
-        audit_data[:activeSitemaps] = sitemaps.size
-        print "  [3/4] Checking Registered Sitemaps... " unless options[:json]
-        puts sitemaps.any? ? Color.c("✅ #{sitemaps.size} sitemaps active", Color::GREEN) : Color.c("⚠️ No sitemaps found in GSC.", Color::YELLOW) unless options[:json]
+        res = api.query_analytics(site_url, days: options[:days], dimensions: %w[query page], row_limit: 2500)
+        if res[:ok]
+          raw_rows = res.dig(:data, 'rows') || []
+          underperformers = []
 
-        # 4. Check Homepage Index Status
-        home_res = api.inspect_url("#{https_origin}/", site_url)
-        verdict = home_res.dig(:data, 'inspectionResult', 'indexStatusResult', 'verdict') || 'UNKNOWN'
-        audit_data[:homepageVerdict] = verdict
-        print "  [4/4] Inspecting Homepage Index Status... " unless options[:json]
-        puts verdict == 'PASS' ? Color.c('✅ PASS (Indexed)', Color::GREEN) : Color.c("⏳ #{verdict}", Color::YELLOW) unless options[:json]
+          raw_rows.each do |r|
+            q = r['keys'][0]
+            p = r['keys'][1]
+            pos = r['position'].round(1)
+            imp = r['impressions']
+            clicks = r['clicks']
+            ctr = (r['ctr'] * 100).round(2)
+
+            next unless pos <= 10.0
+            next unless imp >= min_imp
+
+            expected = expected_ctr_for(pos)
+            gap = expected - ctr
+            next unless gap >= 2.0 && ctr < (expected * 0.70)
+
+            lost_clicks = [((imp * (gap / 100.0))).round, 1].max
+
+            underperformers << {
+              query: q,
+              page: p,
+              position: pos,
+              impressions: imp,
+              clicks: clicks,
+              actualCtr: ctr,
+              expectedCtr: expected,
+              lostClicks: lost_clicks
+            }
+          end
+
+          underperformers.sort_by! { |u| -u[:lostClicks] }
+          underperformers = underperformers.first(options[:limit])
+
+          if options[:json]
+            puts JSON.pretty_generate(underperformers)
+          elsif underperformers.empty?
+            puts Color.c("✅ No significant CTR underperformers detected in Top 10! Your titles are converting well.", Color::GREEN)
+          else
+            puts "#{Color::BOLD}Pos   | Imp    | CTR    | Expected | Lost Clicks | Query & Page#{Color::RESET}"
+            puts "--------------------------------------------------------------------------------"
+            underperformers.each do |item|
+              pos_str    = item[:position].to_s.ljust(5)
+              imp_str    = item[:impressions].to_s.ljust(6)
+              ctr_str    = "#{item[:actualCtr]}%".ljust(6)
+              exp_str    = "~#{item[:expectedCtr]}%".ljust(8)
+              lost_str   = "~#{item[:lostClicks]} clicks".ljust(11)
+              page_short = item[:page].sub(%r{^https?://[^/]+}, '')
+              page_short = '/' if page_short.empty?
+
+              puts "#{Color.c(pos_str, Color::GREEN)} | #{imp_str} | #{Color.c(ctr_str, Color::RED)} | #{exp_str} | #{Color.c(lost_str, Color::YELLOW, Color::BOLD)} | #{Color.c(page_short, Color::CYAN)}"
+              puts "      |        |        |          |             | ↳ #{Color::BOLD}\"#{item[:query]}\"#{Color::RESET}"
+            end
+            puts "\n#{Color.c("Total Underperformers: #{underperformers.size}", Color::GRAY)}"
+            puts "💡 #{Color::BOLD}Quick Win Playbook:#{Color::RESET} You already have top rankings! Rewrite the <title> tag and meta description with numbers, brackets [2026], or clear benefit hooks to recover lost clicks immediately.\n\n"
+
+            if options[:csv]
+              csv_data = underperformers.map { |u| [u[:query], u[:page], u[:position], u[:impressions], u[:clicks], u[:actualCtr], u[:expectedCtr], u[:lostClicks]] }
+              write_csv(options[:csv], %w[Query Page Position Impressions Clicks ActualCTR ExpectedCTR LostClicks], csv_data)
+              puts Color.c("📁 Exported CTR underperformers to #{options[:csv]}", Color::CYAN)
+            end
+          end
+        else
+          if options[:json]
+            puts JSON.pretty_generate({ error: res[:data] })
+          else
+            puts Color.c("❌ Search Analytics Error (#{res[:status]}): #{res[:data]}", Color::RED)
+          end
+        end
+
+      when 'cannibalization', 'conflicts'
+        puts "⚔️ Analyzing keyword cannibalization conflicts for #{Color.c(site_url, Color::CYAN)} (Past #{options[:days]} days)...\n" unless options[:json]
+
+        res = api.query_analytics(site_url, days: options[:days], dimensions: %w[query page], row_limit: 5000)
+        if res[:ok]
+          raw_rows = res.dig(:data, 'rows') || []
+          grouped = Hash.new { |h, k| h[k] = [] }
+          raw_rows.each do |r|
+            grouped[r['keys'][0]] << {
+              page: r['keys'][1],
+              clicks: r['clicks'],
+              impressions: r['impressions'],
+              position: r['position'].round(1)
+            }
+          end
+
+          conflicts = []
+          grouped.each do |query, pages|
+            next if pages.size < 2
+
+            total_imp = pages.sum { |p| p[:impressions] }
+            next if total_imp < (options[:min_imp] || 10)
+
+            sorted_pages = pages.sort_by { |p| -p[:impressions] }
+            secondary = sorted_pages[1]
+
+            sec_ratio = secondary[:impressions].to_f / total_imp
+            next unless sec_ratio >= 0.15
+
+            conflicts << {
+              query: query,
+              totalImpressions: total_imp,
+              totalClicks: pages.sum { |p| p[:clicks] },
+              competingPagesCount: pages.size,
+              pages: sorted_pages.map do |p|
+                p.merge(impressionShare: "#{( (p[:impressions].to_f / total_imp) * 100 ).round(1)}%")
+              end
+            }
+          end
+
+          conflicts.sort_by! { |c| -c[:totalImpressions] }
+          conflicts = conflicts.first(options[:limit])
+
+          if options[:json]
+            puts JSON.pretty_generate(conflicts)
+          elsif conflicts.empty?
+            puts Color.c("✅ Zero keyword cannibalization detected! Each query has a distinct ranking page.", Color::GREEN)
+          else
+            puts "#{Color::BOLD}⚠️  #{conflicts.size} Keyword Cannibalization Conflicts Found:#{Color::RESET}\n\n"
+            conflicts.each_with_index do |conf, i|
+              puts "#{Color::BOLD}#{i + 1}. \"#{conf[:query]}\"#{Color::RESET} (Total Imp: #{Color.c(conf[:totalImpressions].to_s, Color::CYAN)}, Clicks: #{conf[:totalClicks]})"
+              conf[:pages].each do |p|
+                share_str = p[:impressionShare].ljust(6)
+                imp_str   = "#{p[:impressions]} imp".ljust(9)
+                pos_str   = "Pos #{p[:position]}".ljust(9)
+                page_short = p[:page].sub(%r{^https?://[^/]+}, '')
+                page_short = '/' if page_short.empty?
+                puts "   • #{Color.c(share_str, Color::YELLOW)} | #{imp_str} | #{pos_str} | #{page_short}"
+              end
+              primary_url = conf[:pages][0][:page].sub(%r{^https?://[^/]+}, '')
+              puts "   👉 #{Color.c("Remedy:", Color::BOLD)} Set canonical pointing to #{Color.c(primary_url, Color::CYAN)} or 301 redirect secondary pages.\n\n"
+            end
+
+            if options[:csv]
+              csv_rows = []
+              conflicts.each do |c|
+                c[:pages].each do |p|
+                  csv_rows << [c[:query], c[:totalImpressions], p[:page], p[:impressionShare], p[:impressions], p[:clicks], p[:position]]
+                end
+              end
+              write_csv(options[:csv], %w[Query TotalImpressions Page ImpressionShare PageImpressions PageClicks Position], csv_rows)
+              puts Color.c("📁 Exported cannibalization report to #{options[:csv]}", Color::CYAN)
+            end
+          end
+        else
+          if options[:json]
+            puts JSON.pretty_generate({ error: res[:data] })
+          else
+            puts Color.c("❌ Search Analytics Error (#{res[:status]}): #{res[:data]}", Color::RED)
+          end
+        end
+
+      when 'decay', 'trends'
+        window_days = options[:compare] || 28
+        puts "📉 Analyzing ranking & traffic decay for #{Color.c(site_url, Color::CYAN)} (Comparing Past #{window_days}d vs Prior #{window_days}d)...\n" unless options[:json]
+
+        end_current = Date.today - 2
+        start_current = end_current - window_days
+        end_prior = start_current
+        start_prior = end_prior - window_days
+
+        curr_res = api.query_analytics(site_url, start_date: start_current.iso8601, end_date: end_current.iso8601, dimensions: ['query'], row_limit: 2500)
+        prior_res = api.query_analytics(site_url, start_date: start_prior.iso8601, end_date: end_prior.iso8601, dimensions: ['query'], row_limit: 2500)
+
+        if curr_res[:ok] && prior_res[:ok]
+          curr_map = {}
+          (curr_res.dig(:data, 'rows') || []).each do |r|
+            curr_map[r['keys'][0]] = {
+              clicks: r['clicks'],
+              impressions: r['impressions'],
+              position: r['position'].round(1)
+            }
+          end
+
+          prior_map = {}
+          (prior_res.dig(:data, 'rows') || []).each do |r|
+            prior_map[r['keys'][0]] = {
+              clicks: r['clicks'],
+              impressions: r['impressions'],
+              position: r['position'].round(1)
+            }
+          end
+
+          all_queries = (curr_map.keys + prior_map.keys).uniq
+          comparison = []
+
+          all_queries.each do |q|
+            c_data = curr_map[q] || { clicks: 0, impressions: 0, position: 999.0 }
+            p_data = prior_map[q] || { clicks: 0, impressions: 0, position: 999.0 }
+
+            c_clicks = c_data[:clicks]
+            p_clicks = p_data[:clicks]
+            c_imp    = c_data[:impressions]
+            p_imp    = p_data[:impressions]
+            c_pos    = c_data[:position]
+            p_pos    = p_data[:position]
+
+            next if c_imp < 3 && p_imp < 3
+
+            clicks_diff = c_clicks - p_clicks
+            imp_diff    = c_imp - p_imp
+            pos_diff    = (p_pos == 999.0 || c_pos == 999.0) ? 0.0 : (p_pos - c_pos).round(1)
+
+            status = if p_imp.zero? && c_imp.positive?
+              :new
+            elsif c_imp.zero? && p_imp.positive?
+              :lost
+            elsif pos_diff <= -2.5 || (c_imp < p_imp * 0.65 && p_imp >= 10)
+              :decaying
+            elsif pos_diff >= 2.5 || (c_imp > p_imp * 1.35 && c_imp >= 10)
+              :surging
+            else
+              :stable
+            end
+
+            comparison << {
+              query: q,
+              status: status,
+              currentClicks: c_clicks,
+              priorClicks: p_clicks,
+              clicksDiff: clicks_diff,
+              currentImp: c_imp,
+              priorImp: p_imp,
+              impDiff: imp_diff,
+              currentPos: (c_pos == 999.0 ? nil : c_pos),
+              priorPos: (p_pos == 999.0 ? nil : p_pos),
+              posDiff: pos_diff
+            }
+          end
+
+          decaying = comparison.select { |c| c[:status] == :decaying }.sort_by { |c| c[:posDiff] }
+          surging  = comparison.select { |c| c[:status] == :surging }.sort_by { |c| -c[:posDiff] }
+          new_q    = comparison.select { |c| c[:status] == :new }.sort_by { |c| -c[:currentImp] }
+          lost_q   = comparison.select { |c| c[:status] == :lost }.sort_by { |c| -c[:priorImp] }
+
+          summary = {
+            windowDays: window_days,
+            currentPeriod: "#{start_current} to #{end_current}",
+            priorPeriod: "#{start_prior} to #{end_prior}",
+            decayingCount: decaying.size,
+            surgingCount: surging.size,
+            newCount: new_q.size,
+            lostCount: lost_q.size,
+            decaying: decaying.first(options[:limit]),
+            surging: surging.first(options[:limit]),
+            newDiscoveries: new_q.first(options[:limit]),
+            lostKeywords: lost_q.first(options[:limit])
+          }
+
+          if options[:json]
+            puts JSON.pretty_generate(summary)
+          else
+            puts "#{Color::BOLD}📊 SEARCH CONSOLE TRENDS SUMMARY (#{window_days}-Day Comparison)#{Color::RESET}"
+            puts "#{Color::BOLD}══════════════════════════════════════════════════════════════#{Color::RESET}"
+            puts "  🔻 Decaying Keywords:   #{Color.c(decaying.size.to_s, Color::RED, Color::BOLD)}"
+            puts "  🚀 Surging Keywords:     #{Color.c(surging.size.to_s, Color::GREEN, Color::BOLD)}"
+            puts "  ✨ New Breakout Queries: #{Color.c(new_q.size.to_s, Color::CYAN, Color::BOLD)}"
+            puts "  💀 Lost Keywords:        #{Color.c(lost_q.size.to_s, Color::GRAY, Color::BOLD)}"
+            puts "#{Color::BOLD}══════════════════════════════════════════════════════════════#{Color::RESET}\n"
+
+            if decaying.any?
+              puts "#{Color::BOLD}🔻 TOP DECAYING KEYWORDS (Rank or Traffic Loss):#{Color::RESET}"
+              puts "Prior Pos | Curr Pos | Drop   | Prior Imp | Curr Imp | Query"
+              puts "--------------------------------------------------------------------------------"
+              decaying.first(options[:limit]).each do |d|
+                p_pos = d[:priorPos] ? d[:priorPos].to_s.ljust(9) : '-'.ljust(9)
+                c_pos = d[:currentPos] ? d[:currentPos].to_s.ljust(8) : 'Off P2'.ljust(8)
+                drop  = Color.c("#{d[:posDiff]}".ljust(6), Color::RED)
+                p_imp = d[:priorImp].to_s.ljust(9)
+                c_imp = d[:currentImp].to_s.ljust(8)
+                puts "#{p_pos} | #{c_pos} | #{drop} | #{p_imp} | #{c_imp} | #{Color::BOLD}\"#{d[:query]}\"#{Color::RESET}"
+              end
+              puts
+            end
+
+            if surging.any?
+              puts "#{Color::BOLD}🚀 TOP SURGING KEYWORDS (Rank or Traffic Gain):#{Color::RESET}"
+              puts "Prior Pos | Curr Pos | Gain   | Prior Imp | Curr Imp | Query"
+              puts "--------------------------------------------------------------------------------"
+              surging.first(options[:limit]).each do |s|
+                p_pos = s[:priorPos] ? s[:priorPos].to_s.ljust(9) : '-'.ljust(9)
+                c_pos = s[:currentPos] ? s[:currentPos].to_s.ljust(8) : '-'.ljust(8)
+                gain  = Color.c("+#{s[:posDiff]}".ljust(6), Color::GREEN)
+                p_imp = s[:priorImp].to_s.ljust(9)
+                c_imp = s[:currentImp].to_s.ljust(8)
+                puts "#{p_pos} | #{c_pos} | #{gain} | #{p_imp} | #{c_imp} | #{Color::BOLD}\"#{s[:query]}\"#{Color::RESET}"
+              end
+              puts
+            end
+
+            if options[:csv]
+              csv_rows = comparison.map do |c|
+                [c[:query], c[:status], c[:priorPos], c[:currentPos], c[:posDiff], c[:priorImp], c[:currentImp], c[:impDiff], c[:priorClicks], c[:currentClicks], c[:clicksDiff]]
+              end
+              write_csv(options[:csv], %w[Query Status PriorPos CurrentPos PosDiff PriorImp CurrentImp ImpDiff PriorClicks CurrentClicks ClicksDiff], csv_rows)
+              puts Color.c("📁 Exported decay & trend analysis to #{options[:csv]}", Color::CYAN)
+            end
+          end
+        else
+          err = curr_res[:data] || prior_res[:data]
+          if options[:json]
+            puts JSON.pretty_generate({ error: err })
+          else
+            puts Color.c("❌ Search Analytics Error: #{err}", Color::RED)
+          end
+        end
+
+      when 'zombies', 'bloat'
+        sitemap_target = target
+        puts "🧟 Scanning for Zombie Pages (Index Bloat) against 90-day search traffic...\n" unless options[:json]
+
+        urls = SitemapLoader.resolve_urls(sitemap_target, https_origin)
+        if urls.empty?
+          if options[:json]
+            puts JSON.pretty_generate({ error: 'No URLs found to audit in sitemap.' })
+          else
+            puts Color.c("❌ Error: No URLs found in sitemap #{sitemap_target || 'public/sitemap.xml'}", Color::RED)
+          end
+          exit 1
+        end
+
+        puts "🔍 Loaded #{Color.c(urls.size.to_s, Color::CYAN)} URLs from sitemap. Querying 90-day GSC impressions..." unless options[:json]
+        res = api.query_analytics(site_url, days: 90, dimensions: ['page'], row_limit: 5000)
+
+        if res[:ok]
+          active_pages = {}
+          (res.dig(:data, 'rows') || []).each do |r|
+            clean_page = r['keys'][0].downcase.sub(%r{/$}, '')
+            active_pages[clean_page] = {
+              clicks: r['clicks'],
+              impressions: r['impressions'],
+              position: r['position'].round(1)
+            }
+          end
+
+          zombies = []
+          active  = []
+
+          urls.each do |url|
+            clean_u = url.downcase.sub(%r{/$}, '')
+            if active_pages.key?(clean_u)
+              active << active_pages[clean_u].merge(url: url)
+            else
+              zombies << url
+            end
+          end
+
+          zombie_ratio = ((zombies.size.to_f / urls.size) * 100).round(1)
+          payload = {
+            totalSitemapUrls: urls.size,
+            activeCount: active.size,
+            zombieCount: zombies.size,
+            zombiePercentage: "#{zombie_ratio}%",
+            zombieUrls: zombies.first(options[:limit])
+          }
+
+          if options[:json]
+            puts JSON.pretty_generate(payload)
+          else
+            puts "\n#{Color::BOLD}══════════════════════════════════════════════════════════════#{Color::RESET}"
+            puts "#{Color::BOLD}🧟 ZOMBIE PAGE / INDEX BLOAT AUDIT (#{urls.size} Sitemap URLs)#{Color::RESET}"
+            puts "#{Color::BOLD}══════════════════════════════════════════════════════════════#{Color::RESET}"
+            puts "  ✅ Active URLs (Receiving Impressions): #{Color.c(active.size.to_s, Color::GREEN, Color::BOLD)} (#{'%.1f' % (100 - zombie_ratio)}%)"
+            puts "  🧟 Zombie URLs (0 Impressions in 90d):   #{Color.c(zombies.size.to_s, Color::RED, Color::BOLD)} (#{zombie_ratio}%)"
+            puts "#{Color::BOLD}══════════════════════════════════════════════════════════════#{Color::RESET}\n"
+
+            if zombies.any?
+              puts "#{Color::BOLD}Sample Zombie URLs (Wasted Crawl Budget):#{Color::RESET}"
+              zombies.first(options[:limit]).each do |zu|
+                short_u = zu.sub(%r{^https?://[^/]+}, '')
+                puts "  • #{Color.c(short_u, Color::RED)}"
+              end
+              puts "\n💡 #{Color::BOLD}Action Plan:#{Color::RESET} If these pages are thin or duplicates, add 'noindex' or 301 redirect them to preserve crawl budget for core revenue pages.\n\n"
+            end
+
+            if options[:csv]
+              csv_rows = urls.map { |u| [u, active_pages.key?(u.downcase.sub(%r{/$}, '')) ? 'ACTIVE' : 'ZOMBIE'] }
+              write_csv(options[:csv], %w[URL Status], csv_rows)
+              puts Color.c("📁 Exported zombie report to #{options[:csv]}", Color::CYAN)
+            end
+          end
+        else
+          if options[:json]
+            puts JSON.pretty_generate({ error: res[:data] })
+          else
+            puts Color.c("❌ Search Analytics Error (#{res[:status]}): #{res[:data]}", Color::RED)
+          end
+        end
+
+      when 'ga4', 'bounce'
+        property_id = options[:property] || Config.ga4_property_id(hostname)
+        unless property_id
+          if options[:json]
+            puts JSON.pretty_generate({
+              error: 'no_ga4_property_linked',
+              domain: hostname,
+              hint: "No GA4 property linked for domain '#{hostname}'. Run 'gsc config set-ga4 <property_id> -d #{hostname}' or pass '--property <id>'."
+            })
+          else
+            puts "\n#{Color.c("⚠️  No GA4 Property ID linked for domain: #{hostname}", Color::YELLOW, Color::BOLD)}"
+            puts "\nGoogle Analytics 4 is not yet linked for #{Color.c(hostname, Color::CYAN)}."
+            puts "To link your GA4 Property ID to this domain, run:"
+            puts "   #{Color.c("gsc config set-ga4 <property_id> -d #{hostname}", Color::GREEN, Color::BOLD)}"
+            puts "\nOr specify a property ID directly:"
+            puts "   #{Color.c("gsc ga4 --property <property_id>", Color::CYAN)}"
+            puts "   #{Color.c("gsc ga4-properties", Color::CYAN)} (to discover accessible GA4 properties)"
+            puts
+          end
+          return
+        end
+
+        traffic_label = options[:organic] ? "Organic Search Only" : "All Traffic"
+        puts "📈 Fetching GA4 landing page behavioral metrics for #{Color.c(hostname, Color::CYAN)} [Property #{property_id}] (#{traffic_label}, Past #{options[:days]} days)..." unless options[:json]
+
+        res = api.query_ga4_report(property_id, days: options[:days], limit: options[:limit] * 3, organic_only: options[:organic], hostname: (options[:all_hosts] ? nil : hostname), site_only: options[:site_only])
+        if res[:ok]
+          raw_rows = res.dig(:data, 'rows') || []
+          if raw_rows.empty?
+            if options[:json]
+              puts JSON.pretty_generate([])
+            else
+              puts Color.c("⚠️ No landing page behavioral data found in GA4 for this date range.", Color::YELLOW)
+            end
+            return
+          end
+
+          pages_map = {}
+          raw_rows.each do |row|
+            path_val = row.dig('dimensionValues', 0, 'value') || '/'
+            norm = normalize_path(path_val)
+
+            sessions = row.dig('metricValues', 0, 'value').to_i
+            users    = row.dig('metricValues', 1, 'value').to_i
+            eng_rate = row.dig('metricValues', 2, 'value').to_f
+            bounce   = row.dig('metricValues', 3, 'value').to_f
+            duration = row.dig('metricValues', 4, 'value').to_f
+            views    = row.dig('metricValues', 5, 'value').to_i
+
+            pages_map[norm] ||= { path: norm, sessions: 0, users: 0, views: 0, total_duration_secs: 0.0, weighted_eng: 0.0, weighted_bounce: 0.0 }
+            entry = pages_map[norm]
+            entry[:sessions] += sessions
+            entry[:users] += users
+            entry[:views] += views
+            entry[:total_duration_secs] += (duration * sessions)
+            entry[:weighted_eng] += (eng_rate * sessions)
+            entry[:weighted_bounce] += (bounce * sessions)
+          end
+
+          data = pages_map.values.map do |e|
+            s = e[:sessions]
+            avg_eng = s.positive? ? (e[:weighted_eng] / s) * 100.0 : 0.0
+            avg_bounce = s.positive? ? (e[:weighted_bounce] / s) * 100.0 : 0.0
+            avg_dur = s.positive? ? (e[:total_duration_secs] / s) : 0.0
+
+            {
+              path: e[:path],
+              sessions: s,
+              users: e[:users],
+              views: e[:views],
+              engagement_rate: avg_eng.round(1),
+              bounce_rate: avg_bounce.round(1),
+              duration_seconds: avg_dur.round(1),
+              duration_formatted: format_duration(avg_dur)
+            }
+          end
+
+          sort_key = case options[:sort]&.to_s&.downcase
+          when 'bounce' then :bounce_rate
+          when 'eng', 'engagement' then :engagement_rate
+          when 'dur', 'duration', 'time' then :duration_seconds
+          when 'views', 'pageviews' then :views
+          when 'users' then :users
+          else :sessions
+          end
+
+          is_asc = (options[:order] == 'asc')
+          data.sort_by! { |d| d[sort_key] || 0 }
+          data.reverse! unless is_asc
+
+          display_rows = data.first(options[:limit])
+
+          if options[:json]
+            puts JSON.pretty_generate(display_rows)
+          else
+            puts "\n#{Color::BOLD}Sessions | Bounce | Eng Rate | Avg Time | Views | Landing Page Path#{Color::RESET}"
+            puts "--------------------------------------------------------------------------------"
+            display_rows.each do |r|
+              s_col = r[:sessions].to_s.ljust(8)
+
+              b_pct = "#{r[:bounce_rate]}%"
+              b_col = if r[:bounce_rate] >= 70.0
+                Color.c(b_pct.ljust(6), Color::RED, Color::BOLD)
+              elsif r[:bounce_rate] <= 40.0
+                Color.c(b_pct.ljust(6), Color::GREEN)
+              else
+                b_pct.ljust(6)
+              end
+
+              e_col = "#{r[:engagement_rate]}%".ljust(8)
+              d_col = r[:duration_formatted].ljust(8)
+              v_col = r[:views].to_s.ljust(5)
+              p_col = Color.c(r[:path], Color::CYAN)
+
+              puts "#{s_col} | #{b_col} | #{e_col} | #{d_col} | #{v_col} | #{p_col}"
+            end
+
+            puts "\nTotal Landing Pages: #{data.size} (Showing #{display_rows.size})\n"
+          end
+
+          if options[:csv]
+            csv_rows = display_rows.map do |r|
+              [r[:path], r[:sessions], r[:users], "#{r[:bounce_rate]}%", "#{r[:engagement_rate]}%", r[:duration_seconds], r[:views]]
+            end
+            write_csv(options[:csv], %w[Path Sessions ActiveUsers BounceRate EngagementRate DurationSeconds PageViews], csv_rows)
+            puts Color.c("📁 Exported GA4 report to #{options[:csv]}", Color::CYAN) unless options[:json]
+          end
+        else
+          handle_ga4_api_error(res, property_id, hostname, options)
+        end
+
+      when 'correlation', 'engagement'
+        property_id = options[:property] || Config.ga4_property_id(hostname)
+        unless property_id
+          if options[:json]
+            puts JSON.pretty_generate({
+              error: 'no_ga4_property_linked',
+              domain: hostname,
+              hint: "Correlation requires a linked GA4 Property ID. Run 'gsc config set-ga4 <property_id> -d #{hostname}'."
+            })
+          else
+            puts "\n#{Color.c("⚠️  Correlation requires a linked GA4 Property for: #{hostname}", Color::YELLOW, Color::BOLD)}"
+            puts "\nSearch Console measures #{Color::BOLD}Pre-Click SERP rankings#{Color::RESET}, while GA4 measures #{Color::BOLD}Post-Click on-site behavior#{Color::RESET}."
+            puts "To correlate them, link your GA4 Property ID to this domain:"
+            puts "   #{Color.c("gsc config set-ga4 <property_id> -d #{hostname}", Color::GREEN, Color::BOLD)}"
+            puts "\nOr specify directly:"
+            puts "   #{Color.c("gsc correlation --property <property_id>", Color::CYAN)}"
+            puts "   #{Color.c("gsc ga4-properties", Color::CYAN)} (to discover accessible GA4 properties)"
+            puts
+          end
+          return
+        end
+
+        traffic_mode = options[:organic] ? "Organic Search Only" : "All Traffic"
+        puts "🔗 Correlating Search Console Rankings with GA4 On-Site Behavior for #{Color.c(hostname, Color::CYAN)}..." unless options[:json]
+        puts "   GSC: #{Color.c(site_url, Color::CYAN)} | GA4 Property: #{Color.c(property_id, Color::MAGENTA)} (#{traffic_mode}, #{options[:days]}d)\n" unless options[:json]
+
+        # 1. Fetch GSC Page Rankings
+        gsc_res = api.query_analytics(site_url, days: options[:days], dimensions: ['page'], row_limit: 250)
+        unless gsc_res[:ok]
+          if options[:json]
+            puts JSON.pretty_generate({ error: "GSC Error: #{gsc_res[:data]}" })
+          else
+            puts Color.c("❌ Search Console Error (#{gsc_res[:status]}): #{gsc_res[:data]}", Color::RED)
+          end
+          return
+        end
+
+        # 2. Fetch GA4 Behavioral Report
+        ga4_res = api.query_ga4_report(property_id, days: options[:days], limit: 250, organic_only: options[:organic], hostname: (options[:all_hosts] ? nil : hostname), site_only: options[:site_only])
+        unless ga4_res[:ok]
+          handle_ga4_api_error(ga4_res, property_id, hostname, options)
+          return
+        end
+
+        gsc_rows = gsc_res.dig(:data, 'rows') || []
+        ga4_rows = ga4_res.dig(:data, 'rows') || []
+
+        # Index GA4 pages by normalized path
+        ga4_index = {}
+        ga4_rows.each do |r|
+          path_val = r.dig('dimensionValues', 0, 'value') || '/'
+          norm = normalize_path(path_val)
+
+          sessions = r.dig('metricValues', 0, 'value').to_i
+          eng_rate = r.dig('metricValues', 2, 'value').to_f
+          bounce   = r.dig('metricValues', 3, 'value').to_f
+          dur      = r.dig('metricValues', 4, 'value').to_f
+          views    = r.dig('metricValues', 5, 'value').to_i
+
+          ga4_index[norm] ||= { sessions: 0, views: 0, total_dur: 0.0, weighted_eng: 0.0, weighted_bounce: 0.0 }
+          e = ga4_index[norm]
+          e[:sessions] += sessions
+          e[:views] += views
+          e[:total_dur] += (dur * sessions)
+          e[:weighted_eng] += (eng_rate * sessions)
+          e[:weighted_bounce] += (bounce * sessions)
+        end
+
+        merged = []
+        gsc_seen = {}
+
+        gsc_rows.each do |row|
+          full_url = row['keys'][0]
+          norm = normalize_path(full_url)
+          gsc_seen[norm] = true
+
+          clicks = row['clicks'].to_i
+          imp    = row['impressions'].to_i
+          pos    = row['position'].to_f.round(1)
+          ctr    = (row['ctr'].to_f * 100.0).round(1)
+
+          ga4_data = ga4_index[norm]
+          if ga4_data
+            s = ga4_data[:sessions]
+            b_rate = s.positive? ? (ga4_data[:weighted_bounce] / s) * 100.0 : 0.0
+            e_rate = s.positive? ? (ga4_data[:weighted_eng] / s) * 100.0 : 0.0
+            dur    = s.positive? ? (ga4_data[:total_dur] / s) : 0.0
+          else
+            s = 0
+            b_rate = 0.0
+            e_rate = 0.0
+            dur = 0.0
+          end
+
+          diagnosis = if clicks >= 10 && dur >= 90.0
+            '🛠️ ENGAGED TOOL'
+          elsif clicks >= 10 && b_rate >= 70.0 && dur < 45.0
+            '🚨 HIGH BOUNCE'
+          elsif pos >= 7.0 && (dur >= 60.0 || (s >= 10 && b_rate <= 35.0))
+            '⭐ HIDDEN GEM'
+          elsif clicks >= 15 && s < 5
+            '⚠️ TRACKING GAP'
+          elsif pos <= 5.0 && ctr >= 5.0 && b_rate <= 50.0 && s >= 10
+            '💎 WINNER'
+          elsif s.zero? && clicks.zero?
+            '💤 DORMANT'
+          else
+            'HEALTHY'
+          end
+
+          merged << {
+            path: norm,
+            url: full_url,
+            clicks: clicks,
+            impressions: imp,
+            position: pos,
+            ctr: ctr,
+            sessions: s,
+            bounce_rate: b_rate.round(1),
+            engagement_rate: e_rate.round(1),
+            duration_seconds: dur.round(1),
+            duration_formatted: format_duration(dur),
+            diagnosis: diagnosis
+          }
+        end
+
+        ga4_index.each do |norm, e|
+          next if gsc_seen[norm]
+          s = e[:sessions]
+          b_rate = s.positive? ? (e[:weighted_bounce] / s) * 100.0 : 0.0
+          e_rate = s.positive? ? (e[:weighted_eng] / s) * 100.0 : 0.0
+          dur    = s.positive? ? (e[:total_dur] / s) : 0.0
+
+          merged << {
+            path: norm,
+            url: "https://#{hostname}#{norm}",
+            clicks: 0,
+            impressions: 0,
+            position: 99.0,
+            ctr: 0.0,
+            sessions: s,
+            bounce_rate: b_rate.round(1),
+            engagement_rate: e_rate.round(1),
+            duration_seconds: dur.round(1),
+            duration_formatted: format_duration(dur),
+            diagnosis: 'DIRECT/REFERRAL'
+          }
+        end
+
+        merged.sort_by! { |m| [m[:diagnosis] == '🚨 HIGH BOUNCE' ? 0 : 1, -m[:clicks], -m[:sessions]] }
+        display_rows = merged.first(options[:limit])
 
         if options[:json]
-          puts JSON.pretty_generate(audit_data)
+          puts JSON.pretty_generate(display_rows)
         else
-          puts "\n#{Color::BOLD}══════════════════════════════════════════════════════════════#{Color::RESET}\n"
+          puts "#{Color::BOLD}GSC Clicks | GSC Pos | GA4 Sess | Bounce | Avg Time | Insight               | Page Path#{Color::RESET}"
+          puts "---------------------------------------------------------------------------------------------------------"
+          display_rows.each do |r|
+            c_col = r[:clicks].to_s.ljust(10)
+            p_col = r[:position].to_s.ljust(7)
+            s_col = r[:sessions].to_s.ljust(8)
+
+            b_pct = "#{r[:bounce_rate]}%"
+            b_col = if r[:bounce_rate] >= 70.0 && r[:sessions] > 0
+              Color.c(b_pct.ljust(6), Color::RED, Color::BOLD)
+            elsif r[:bounce_rate] <= 40.0 && r[:sessions] > 0
+              Color.c(b_pct.ljust(6), Color::GREEN)
+            else
+              b_pct.ljust(6)
+            end
+
+            t_col = r[:duration_formatted].ljust(8)
+
+            diag_str = case r[:diagnosis]
+            when '🚨 HIGH BOUNCE' then Color.c('🚨 HIGH BOUNCE'.ljust(21), Color::RED, Color::BOLD)
+            when '🛠️ ENGAGED TOOL' then Color.c('🛠️ ENGAGED TOOL'.ljust(21), Color::CYAN, Color::BOLD)
+            when '⭐ HIDDEN GEM' then Color.c('⭐ HIDDEN GEM'.ljust(21), Color::YELLOW, Color::BOLD)
+            when '⚠️ TRACKING GAP' then Color.c('⚠️ TRACKING GAP'.ljust(21), Color::YELLOW)
+            when '💎 WINNER' then Color.c('💎 WINNER'.ljust(21), Color::GREEN, Color::BOLD)
+            else Color.c(r[:diagnosis].ljust(21), Color::GRAY)
+            end
+
+            path_col = Color.c(r[:path], Color::CYAN)
+
+            puts "#{c_col} | #{p_col} | #{s_col} | #{b_col} | #{t_col} | #{diag_str} | #{path_col}"
+          end
+
+          high_bounce = merged.select { |m| m[:diagnosis] == '🚨 HIGH BOUNCE' }
+          gems        = merged.select { |m| m[:diagnosis] == '⭐ HIDDEN GEM' }
+          tools       = merged.select { |m| m[:diagnosis] == '🛠️ ENGAGED TOOL' }
+
+          if tools.any?
+            puts "\n💡 #{Color::BOLD}Engaged Tool / Utility Action Plan:#{Color::RESET} #{tools.size} interactive pages show exceptional time on page (>90s). Since users get their answer and leave, add embedded CTAs, related tools, or app trials to convert these active users."
+          end
+          if high_bounce.any?
+            puts "💡 #{Color::BOLD}High Bounce Action Plan:#{Color::RESET} #{high_bounce.size} pages receive search clicks but abandon quickly (<45s with >70% bounce). Check for search intent mismatch (e.g. consumer searches landing on B2B features) or optimize above-the-fold content."
+          end
+          if gems.any?
+            puts "💡 #{Color::BOLD}Hidden Gem Action Plan:#{Color::RESET} #{gems.size} pages show exceptional visitor stickiness despite lower rankings. Build internal links from your homepage to push them into the Top 3 on Google."
+          end
+          puts
+        end
+
+        if options[:csv]
+          csv_rows = display_rows.map do |r|
+            [r[:path], r[:url], r[:clicks], r[:impressions], r[:position], "#{r[:ctr]}%", r[:sessions], "#{r[:bounce_rate]}%", "#{r[:engagement_rate]}%", r[:duration_seconds], r[:diagnosis]]
+          end
+          write_csv(options[:csv], %w[Path URL GSCClicks GSCImpressions GSCPosition GSCCTR GA4Sessions GA4BounceRate GA4EngagementRate GA4Duration Diagnosis], csv_rows)
+          puts Color.c("📁 Exported correlation report to #{options[:csv]}", Color::CYAN) unless options[:json]
+        end
+
+      when 'ga4-properties', 'ga4-list'
+        puts "🔍 Discovering Google Analytics 4 properties accessible by service account...\n" unless options[:json]
+        res = api.list_ga4_summaries
+        if res[:ok]
+          summaries = res.dig(:data, 'accountSummaries') || []
+          properties = []
+          summaries.each do |acc|
+            acc_name = acc['displayName'] || acc['account']
+            (acc['propertySummaries'] || []).each do |prop|
+              prop_id = prop['property'].sub(%r{^properties/}, '')
+              prop_name = prop['displayName']
+              properties << {
+                propertyId: prop_id,
+                displayName: prop_name,
+                accountName: acc_name,
+                fullResource: prop['property']
+              }
+            end
+          end
+
+          linked_prop = Config.ga4_property_id(hostname)
+
+          if options[:json]
+            puts JSON.pretty_generate(properties)
+          elsif properties.empty?
+            puts Color.c("⚠️ No GA4 properties found accessible by this service account.", Color::YELLOW)
+            puts "\n#{Color::BOLD}To grant access:#{Color::RESET}"
+            puts "1. Go to: https://analytics.google.com/"
+            puts "2. In Admin > Property Access Management, add your service account email with Viewer role."
+          else
+            puts "#{Color::BOLD}Property ID  | GA4 Property Name           | Account Name#{Color::RESET}"
+            puts "--------------------------------------------------------------------------------"
+            properties.each do |p|
+              id_str = Color.c(p[:propertyId].ljust(12), Color::MAGENTA, Color::BOLD)
+              name_str = p[:displayName].ljust(27)
+              acc_str  = Color.c(p[:accountName], Color::GRAY)
+
+              is_linked = (p[:propertyId] == linked_prop)
+              matches_dom = p[:displayName].downcase.include?(hostname.downcase.sub(/\..*$/, ''))
+
+              tag = if is_linked
+                " #{Color.c('👈 [LINKED to ' + hostname + ']', Color::GREEN, Color::BOLD)}"
+              elsif matches_dom
+                " #{Color.c('👈 [Recommended for ' + hostname + ']', Color::CYAN)}"
+              else
+                ""
+              end
+
+              puts "#{id_str} | #{name_str} | #{acc_str}#{tag}"
+            end
+
+            puts "\nTo link a property to #{Color.c(hostname, Color::CYAN)}:"
+            puts "   #{Color.c("gsc config set-ga4 <property_id> -d #{hostname}", Color::GREEN, Color::BOLD)}\n\n"
+          end
+        else
+          handle_ga4_api_error(res, nil, hostname, options)
+        end
+
+      when 'realtime', 'live'
+        property_id = options[:property] || Config.ga4_property_id(hostname)
+        unless property_id
+          if options[:json]
+            puts JSON.pretty_generate({
+              error: 'no_ga4_property_linked',
+              domain: hostname,
+              hint: "Realtime monitoring requires a linked GA4 Property ID. Run 'gsc config set-ga4 <property_id> -d #{hostname}'."
+            })
+          else
+            puts "\n#{Color.c("⚠️  Realtime monitoring requires a linked GA4 Property for: #{hostname}", Color::YELLOW, Color::BOLD)}"
+            puts "To link your GA4 Property ID to this domain, run:"
+            puts "   #{Color.c("gsc config set-ga4 <property_id> -d #{hostname}", Color::GREEN, Color::BOLD)}"
+            puts "\nOr specify directly:"
+            puts "   #{Color.c("gsc realtime --property <property_id>", Color::CYAN)}"
+            puts "   #{Color.c("gsc ga4-properties", Color::CYAN)} (to discover accessible GA4 properties)"
+            puts
+          end
+          return
+        end
+
+        interval = options[:watch] ? [options[:watch], 3].max : nil
+        title_map = api.query_ga4_title_map(property_id, hostname: (options[:all_hosts] ? nil : hostname), site_only: options[:site_only])
+
+        begin
+          loop do
+            print "\e[H\e[2J" if interval && !options[:json]
+
+            res = api.query_ga4_realtime(property_id, limit: options[:limit] || 25)
+            if res[:ok]
+              data = res[:data] || {}
+              reported_total = data.dig('totals', 0, 'metricValues', 0, 'value')&.to_i
+              raw_rows = data['rows'] || []
+
+              page_counts = Hash.new(0)
+              country_counts = Hash.new(0)
+              breakdown = []
+
+              raw_rows.each do |r|
+                page = r.dig('dimensionValues', 0, 'value')
+                page = '/' if page.nil? || page.strip.empty?
+                country = r.dig('dimensionValues', 1, 'value')
+                country = 'Unknown' if country.nil? || country.strip.empty?
+                active = r.dig('metricValues', 0, 'value').to_i
+
+                # Resolve URL path from page title
+                path = if page.start_with?('/')
+                         page
+                       elsif title_map[page]
+                         title_map[page]
+                       elsif page =~ %r{/(?:[a-zA-Z0-9_\-\./]+)}
+                         page[%r{/(?:[a-zA-Z0-9_\-\./]+)}]
+                       else
+                         match = title_map.find { |t, _| t.downcase.include?(page.downcase) || page.downcase.include?(t.downcase) }
+                         match ? match[1] : '-'
+                       end
+
+                display_key = path.start_with?('/') ? path : page
+                page_counts[display_key] += active
+                country_counts[country] += active
+                breakdown << { path: path, page: page, country: country, active_users: active }
+              end
+
+              row_max = raw_rows.map { |r| r.dig('metricValues', 0, 'value').to_i }.max || 0
+              page_max = page_counts.values.max || 0
+              total_active = reported_total || [row_max, page_max].max || 0
+              if total_active.zero? && raw_rows.any?
+                total_active = [row_max, page_max, 1].max
+              end
+
+              payload = {
+                domain: hostname,
+                property_id: property_id,
+                total_active_users: total_active,
+                timestamp: Time.now.iso8601,
+                top_pages: page_counts.sort_by { |_k, v| -v }.first(options[:limit] || 15).map { |k, v| { page: k, active_users: v } },
+                top_countries: country_counts.sort_by { |_k, v| -v }.first(10).map { |k, v| { country: k, active_users: v } },
+                active_streams: breakdown
+              }
+
+              if options[:json]
+                puts JSON.pretty_generate(payload)
+              else
+                header_text = "⚡ GA4 REALTIME VISITOR MONITOR: #{hostname} [Property #{property_id}]"
+                time_str = Time.now.strftime("%Y-%m-%d %H:%M:%S")
+                puts "#{Color::BOLD}#{Color.c(header_text, Color::CYAN)} (#{time_str})#{Color::RESET}"
+                puts "#{Color::BOLD}══════════════════════════════════════════════════════════════════════════════#{Color::RESET}"
+
+                count_color = total_active > 0 ? Color::GREEN : Color::YELLOW
+                puts "  👥 Active Users (Last 30 Mins): #{Color.c(total_active.to_s, count_color, Color::BOLD)}"
+                puts "#{Color::BOLD}══════════════════════════════════════════════════════════════════════════════#{Color::RESET}\n"
+
+                if total_active.zero? && raw_rows.empty?
+                  puts Color.c("  (No active visitors on site in the last 30 minutes)\n", Color::GRAY)
+                else
+                  puts "#{Color::BOLD}Active Users | Country         | URL Path                       | Page / Screen Title#{Color::RESET}"
+                  puts "------------------------------------------------------------------------------------------------------------------------"
+                  breakdown.first(options[:limit] || 25).each do |b|
+                    u_col = Color.c(b[:active_users].to_s.ljust(12), Color::GREEN, Color::BOLD)
+                    c_col = b[:country].to_s[0..14].ljust(15)
+                    path_str = b[:path].to_s[0..29].ljust(30)
+                    path_col = Color.c(path_str, Color::MAGENTA, Color::BOLD)
+                    p_col = Color.c(b[:page], Color::CYAN)
+                    puts "#{u_col} | #{c_col} | #{path_col} | #{p_col}"
+                  end
+                  puts
+
+                  if country_counts.any?
+                    top_c = country_counts.sort_by { |_k, v| -v }.first(5).map { |c, count| "#{c}: #{count}" }.join(" | ")
+                    puts "🌍 Top Countries: #{top_c}\n\n"
+                  end
+                end
+
+                if interval
+                  puts Color.c("⏳ Refreshing every #{interval}s (Press Ctrl+C to exit)...", Color::GRAY)
+                end
+              end
+            else
+              handle_ga4_api_error(res, property_id, hostname, options)
+              break
+            end
+
+            break unless interval
+            sleep interval
+          end
+        rescue Interrupt
+          puts "\n👋 Exited live monitor." unless options[:json]
+        end
+
+      when 'ads', 'campaigns'
+        property_id = options[:property] || Config.ga4_property_id(hostname)
+        unless property_id
+          if options[:json]
+            puts JSON.pretty_generate({
+              error: 'no_ga4_property_linked',
+              domain: hostname,
+              hint: "Google Ads reporting requires a linked GA4 Property ID. Run 'gsc config set-ga4 <property_id> -d #{hostname}'."
+            })
+          else
+            puts "\n#{Color.c("⚠️  Google Ads reporting requires a linked GA4 Property for: #{hostname}", Color::YELLOW, Color::BOLD)}"
+            puts "To link your GA4 Property ID to this domain, run:"
+            puts "   #{Color.c("gsc config set-ga4 <property_id> -d #{hostname}", Color::GREEN, Color::BOLD)}"
+            puts "\nOr specify directly:"
+            puts "   #{Color.c("gsc ads --property <property_id>", Color::CYAN)}"
+            puts "   #{Color.c("gsc ga4-properties", Color::CYAN)} (to discover accessible GA4 properties)"
+            puts
+          end
+          return
+        end
+
+        puts "📢 Fetching Google Ads campaign performance for #{Color.c(hostname, Color::CYAN)} [Property #{property_id}] (Past #{options[:days]} days)..." unless options[:json]
+
+        res = api.query_ga4_ads(property_id, days: options[:days], limit: options[:limit] || 50)
+        if res[:ok]
+          raw_rows = res.dig(:data, 'rows') || []
+          if raw_rows.empty?
+            if options[:json]
+              puts JSON.pretty_generate({
+                domain: hostname,
+                property_id: property_id,
+                campaigns: [],
+                message: "No Google Ads campaign data recorded in GA4 for this date range."
+              })
+            else
+              puts Color.c("\nℹ️  No Google Ads data found in GA4 for the past #{options[:days]} days.", Color::YELLOW)
+              puts "• Check that Google Ads is linked in GA4 (Admin > Product Links > Google Ads Links)."
+              puts "• Ensure Auto-tagging is enabled in Google Ads settings."
+              puts "• Note: Google Ads cost/click metrics typically take 12–24 hours to populate in GA4.\n\n"
+            end
+            return
+          end
+
+          campaigns = []
+          raw_rows.each do |row|
+            camp_name = row.dig('dimensionValues', 0, 'value') || '(not set)'
+            ad_group  = row.dig('dimensionValues', 1, 'value') || '(not set)'
+
+            clicks    = row.dig('metricValues', 0, 'value').to_i
+            cost      = row.dig('metricValues', 1, 'value').to_f
+            cpc       = row.dig('metricValues', 2, 'value').to_f
+            sessions  = row.dig('metricValues', 3, 'value').to_i
+            conv      = row.dig('metricValues', 4, 'value').to_i
+            bounce    = row.dig('metricValues', 5, 'value').to_f
+
+            cpa = conv.positive? ? (cost / conv) : 0.0
+
+            campaigns << {
+              campaign: camp_name,
+              ad_group: ad_group,
+              clicks: clicks,
+              cost: cost.round(2),
+              cpc: cpc.round(2),
+              sessions: sessions,
+              conversions: conv,
+              cpa: cpa.round(2),
+              bounce_rate: (bounce * 100.0).round(1)
+            }
+          end
+
+          campaigns.reject! { |c| c[:campaign] == '(not set)' && c[:clicks].zero? && c[:cost].zero? }
+
+          if campaigns.empty?
+            if options[:json]
+              puts JSON.pretty_generate([])
+            else
+              puts Color.c("\nℹ️  No Google Ads clicks or spend recorded in GA4 for the past #{options[:days]} days.", Color::YELLOW, Color::BOLD)
+              puts "\n#{Color::BOLD}Diagnostic Checklist:#{Color::RESET}"
+              puts "  1. #{Color::BOLD}Campaign Hasn't Served Yet:#{Color::RESET} If your campaign was published recently, check Google Ads for 'Your campaign hasn't served in the past week' (often due to pending ad review, account security tasks, or low bids)."
+              puts "  2. #{Color::BOLD}0 Impressions / Clicks:#{Color::RESET} GA4 only logs campaigns once Google Ads serves impressions and records traffic."
+              puts "  3. #{Color::BOLD}GA4 Product Link:#{Color::RESET} Verify Google Ads is linked in GA4 (Admin > Product Links > Google Ads Links) with auto-tagging enabled."
+              puts "  4. #{Color::BOLD}Sync Latency:#{Color::RESET} Ad spend & click metrics take 12–24 hours to populate in GA4 after ads begin serving.\n\n"
+            end
+            return
+          end
+
+          campaigns.sort_by! { |c| -c[:clicks] }
+
+          if options[:json]
+            puts JSON.pretty_generate(campaigns)
+          else
+            puts "\n#{Color::BOLD}Clicks | Cost ($) | Avg CPC | Sessions | Conv | CPA ($) | Bounce | Campaign Name [Ad Group]#{Color::RESET}"
+            puts "-------------------------------------------------------------------------------------------------------"
+            total_clicks = 0
+            total_cost = 0.0
+            total_sessions = 0
+            total_conv = 0
+
+            campaigns.first(options[:limit] || 25).each do |c|
+              total_clicks += c[:clicks]
+              total_cost += c[:cost]
+              total_sessions += c[:sessions]
+              total_conv += c[:conversions]
+
+              clk_col = c[:clicks].to_s.ljust(6)
+              cost_col = "$#{format('%.2f', c[:cost])}".ljust(8)
+              cpc_col = "$#{format('%.2f', c[:cpc])}".ljust(7)
+              sess_col = c[:sessions].to_s.ljust(8)
+              conv_col = Color.c(c[:conversions].to_s.ljust(4), c[:conversions].positive? ? Color::GREEN : Color::GRAY)
+              cpa_col = c[:conversions].positive? ? "$#{format('%.2f', c[:cpa])}".ljust(7) : "-".ljust(7)
+              bnc_col = "#{c[:bounce_rate]}%".ljust(6)
+              name_col = "#{Color.c(c[:campaign], Color::CYAN)} [#{Color.c(c[:ad_group], Color::GRAY)}]"
+
+              puts "#{clk_col} | #{cost_col} | #{cpc_col} | #{sess_col} | #{conv_col} | #{cpa_col} | #{bnc_col} | #{name_col}"
+            end
+
+            puts "#{Color::BOLD}═══════════════════════════════════════════════════════════════════════════════════════#{Color::RESET}"
+            total_cpa = total_conv.positive? ? "$#{format('%.2f', total_cost / total_conv)}" : "-"
+            puts "Totals: #{total_clicks} clicks | $#{format('%.2f', total_cost)} cost | #{total_sessions} sessions | #{total_conv} conv | CPA: #{total_cpa}\n\n"
+          end
+
+          if options[:csv]
+            csv_rows = campaigns.map do |c|
+              [c[:campaign], c[:ad_group], c[:clicks], c[:cost], c[:cpc], c[:sessions], c[:conversions], c[:cpa], "#{c[:bounce_rate]}%"]
+            end
+            write_csv(options[:csv], %w[Campaign AdGroup Clicks Cost AvgCPC Sessions Conversions CPA BounceRate], csv_rows)
+            puts Color.c("📁 Exported Google Ads report to #{options[:csv]}", Color::CYAN) unless options[:json]
+          end
+        else
+          handle_ga4_api_error(res, property_id, hostname, options)
+        end
+
+      when 'channels', 'traffic'
+        property_id = options[:property] || Config.ga4_property_id(hostname)
+        unless property_id
+          if options[:json]
+            puts JSON.pretty_generate({
+              error: 'no_ga4_property_linked',
+              domain: hostname,
+              hint: "Traffic channel reporting requires a linked GA4 Property ID. Run 'gsc config set-ga4 <property_id> -d #{hostname}'."
+            })
+          else
+            puts "\n#{Color.c("⚠️  Traffic channel reporting requires a linked GA4 Property for: #{hostname}", Color::YELLOW, Color::BOLD)}"
+            puts "To link your GA4 Property ID to this domain, run:"
+            puts "   #{Color.c("gsc config set-ga4 <property_id> -d #{hostname}", Color::GREEN, Color::BOLD)}"
+            puts "\nOr specify directly:"
+            puts "   #{Color.c("gsc channels --property <property_id>", Color::CYAN)}"
+            puts "   #{Color.c("gsc ga4-properties", Color::CYAN)} (to discover accessible GA4 properties)"
+            puts
+          end
+          return
+        end
+
+        puts "🚦 Fetching Omnichannel acquisition breakdown for #{Color.c(hostname, Color::CYAN)} [Property #{property_id}] (Past #{options[:days]} days)..." unless options[:json]
+
+        res = api.query_ga4_channels(property_id, days: options[:days], limit: options[:limit] || 25, hostname: (options[:all_hosts] ? nil : hostname), site_only: options[:site_only])
+        if res[:ok]
+          raw_rows = res.dig(:data, 'rows') || []
+          if raw_rows.empty?
+            if options[:json]
+              puts JSON.pretty_generate([])
+            else
+              puts Color.c("⚠️ No acquisition channel data found in GA4 for this date range.", Color::YELLOW)
+            end
+            return
+          end
+
+          channels = []
+          raw_rows.each do |row|
+            channel  = row.dig('dimensionValues', 0, 'value') || '(not set)'
+            source   = row.dig('dimensionValues', 1, 'value') || '(not set)'
+
+            sessions = row.dig('metricValues', 0, 'value').to_i
+            users    = row.dig('metricValues', 1, 'value').to_i
+            eng_rate = row.dig('metricValues', 2, 'value').to_f
+            bounce   = row.dig('metricValues', 3, 'value').to_f
+            duration = row.dig('metricValues', 4, 'value').to_f
+            conv     = row.dig('metricValues', 5, 'value').to_i
+
+            channels << {
+              channel: channel,
+              source_medium: source,
+              sessions: sessions,
+              users: users,
+              engagement_rate: (eng_rate * 100.0).round(1),
+              bounce_rate: (bounce * 100.0).round(1),
+              duration_seconds: duration.round(1),
+              duration_formatted: format_duration(duration),
+              conversions: conv
+            }
+          end
+
+          channels.sort_by! { |c| -c[:sessions] }
+
+          if options[:json]
+            puts JSON.pretty_generate(channels)
+          else
+            puts "\n#{Color::BOLD}Sessions | Users | Eng Rate | Bounce | Avg Time | Conv | Channel Group [Source / Medium]#{Color::RESET}"
+            puts "-----------------------------------------------------------------------------------------------"
+            channels.first(options[:limit] || 20).each do |c|
+              s_col = c[:sessions].to_s.ljust(8)
+              u_col = c[:users].to_s.ljust(5)
+              e_col = "#{c[:engagement_rate]}%".ljust(8)
+
+              b_pct = "#{c[:bounce_rate]}%"
+              b_col = if c[:bounce_rate] >= 70.0
+                Color.c(b_pct.ljust(6), Color::RED)
+              elsif c[:bounce_rate] <= 40.0
+                Color.c(b_pct.ljust(6), Color::GREEN)
+              else
+                b_pct.ljust(6)
+              end
+
+              d_col = c[:duration_formatted].ljust(8)
+              cv_col = Color.c(c[:conversions].to_s.ljust(4), c[:conversions].positive? ? Color::GREEN : Color::GRAY)
+              ch_col = "#{Color.c(c[:channel], Color::CYAN)} [#{Color.c(c[:source_medium], Color::GRAY)}]"
+
+              puts "#{s_col} | #{u_col} | #{e_col} | #{b_col} | #{d_col} | #{cv_col} | #{ch_col}"
+            end
+
+            total_s = channels.sum { |c| c[:sessions] }
+            total_u = channels.sum { |c| c[:users] }
+            total_cv = channels.sum { |c| c[:conversions] }
+            puts "\nTotal Channels: #{channels.size} | Total Sessions: #{total_s} | Total Users: #{total_u} | Conversions: #{total_cv}\n\n"
+          end
+
+          if options[:csv]
+            csv_rows = channels.map do |c|
+              [c[:channel], c[:source_medium], c[:sessions], c[:users], "#{c[:engagement_rate]}%", "#{c[:bounce_rate]}%", c[:duration_seconds], c[:conversions]]
+            end
+            write_csv(options[:csv], %w[Channel SourceMedium Sessions Users EngagementRate BounceRate DurationSeconds Conversions], csv_rows)
+            puts Color.c("📁 Exported Channel Acquisition report to #{options[:csv]}", Color::CYAN) unless options[:json]
+          end
+        else
+          handle_ga4_api_error(res, property_id, hostname, options)
         end
 
       else
@@ -1259,10 +3110,12 @@ module GSC
         exit 1
       end
 
-      # 4. Save to ~/.config/gsc/service-account.json
+      # 4. Save to ~/.config/gsc/service-account.json (with strict 0600 file permissions)
       dest = File.join(Config::CONFIG_DIR, 'service-account.json')
       FileUtils.mkdir_p(Config::CONFIG_DIR)
+      File.chmod(0700, Config::CONFIG_DIR) rescue nil
       FileUtils.cp(key_file, dest) unless File.expand_path(key_file) == File.expand_path(dest)
+      File.chmod(0600, dest) rescue nil
       Config.set_key_path(dest)
       puts Color.c("\n✅ Key configured at: #{dest}", Color::GREEN, Color::BOLD)
       puts "   Service Account: #{Color.c(sa['client_email'], Color::CYAN)}"
@@ -1322,14 +3175,105 @@ module GSC
       puts "#{Color::BOLD}══════════════════════════════════════════════════════════════#{Color::RESET}\n"
     end
 
+    def self.handle_connect_ga4_wizard(options = {})
+      puts BANNER
+      puts "#{Color::BOLD}📊 GA4 INTERACTIVE LINKING WIZARD#{Color::RESET}\n"
+
+      key_path = Auth.find_key(options[:key])
+      unless key_path && File.exist?(key_path)
+        puts Color.c("❌ Error: No Google Service Account key found.", Color::RED)
+        puts "Please run #{Color.c('gsc connect', Color::GREEN, Color::BOLD)} first to set up your Google credentials."
+        exit 1
+      end
+
+      sa = JSON.parse(File.read(key_path)) rescue {}
+      sa_email = sa['client_email']
+      unless sa_email
+        puts Color.c("❌ Error: Could not read client_email from #{key_path}", Color::RED)
+        exit 1
+      end
+
+      puts "🔑 Using Service Account: #{Color.c(sa_email, Color::CYAN, Color::BOLD)}\n\n"
+
+      puts "#{Color::BOLD}STEP 1: Enable Google Analytics APIs#{Color::RESET}"
+      puts "  Open Google Cloud Console (in your browser):"
+      puts "  👉 #{Color.c('https://console.cloud.google.com/apis/library/analyticsdata.googleapis.com', Color::CYAN)} (Data API - for metrics)"
+      puts "  👉 #{Color.c('https://console.cloud.google.com/apis/library/analyticsadmin.googleapis.com', Color::CYAN)} (Admin API - for auto-discovery)"
+      puts "  Click the #{Color::BOLD}'ENABLE'#{Color::RESET} button on each page.\n\n"
+
+      puts "#{Color::BOLD}STEP 2: Grant Viewer Access in Google Analytics 4#{Color::RESET}"
+      puts "  1. Open Google Analytics: #{Color.c('https://analytics.google.com/', Color::CYAN)}"
+      puts "  2. Click #{Color::BOLD}Admin#{Color::RESET} (gear icon at bottom-left of your sidebar)"
+      puts "  3. In Property settings, click #{Color::BOLD}Property access management#{Color::RESET}"
+      puts "  4. Click the blue #{Color::BOLD}'+'#{Color::RESET} button at top-right ➔ #{Color::BOLD}Add users#{Color::RESET}"
+      puts "  5. Paste your service account email:"
+      puts "     👉 #{Color.c(sa_email, Color::CYAN, Color::BOLD)}"
+      puts "  6. Assign the #{Color::BOLD}Viewer#{Color::RESET} role, uncheck 'Notify new users', and click #{Color::BOLD}Add#{Color::RESET}.\n\n"
+
+      puts "#{Color::BOLD}STEP 3: Find Your Numeric GA4 Property ID#{Color::RESET}"
+      puts "  • Option A: Look at the top-left property switcher (under your property name)"
+      puts "  • Option B: In #{Color::BOLD}Admin ➔ Property details#{Color::RESET}, copy the 9-digit #{Color::BOLD}Property ID#{Color::RESET} (e.g. 123456789)\n\n"
+
+      default_dom = options[:domain] || Config.default_domain || 'example.com'
+      print "Which domain should this GA4 property link to? [#{default_dom}]: "
+      input_dom = $stdin.gets&.strip
+      target_dom = (input_dom && !input_dom.empty?) ? input_dom : default_dom
+      target_dom = target_dom.sub(%r{^https?://}, '').sub(/^sc-domain:/, '').chomp('/')
+
+      current_id = Config.ga4_property_id(target_dom)
+      id_prompt = current_id ? " [#{current_id}]" : ""
+      print "Enter your 9-digit GA4 Property ID#{id_prompt}: "
+      input_id = $stdin.gets&.strip
+      property_id = (input_id && !input_id.empty?) ? input_id : current_id
+
+      if property_id.nil? || property_id.empty?
+        puts Color.c("\nLinking cancelled.", Color::YELLOW)
+        exit 0
+      end
+
+      clean_id = property_id.to_s.strip.sub(%r{^properties/}, '')
+      puts "\n🔄 Testing connection to GA4 Property #{clean_id}..."
+
+      begin
+        token = Auth.fetch_access_token(sa)
+        client = Client.new(token: token)
+        api = API.new(client)
+
+        test_res = api.query_ga4_report(clean_id, days: 7, limit: 1)
+        if test_res[:ok]
+          Config.set_ga4_property_id(clean_id, target_dom)
+          puts Color.c("✅ Connection verified! Successfully queried Google Analytics Data API.", Color::GREEN, Color::BOLD)
+          puts Color.c("🎉 Linked GA4 Property #{clean_id} to #{target_dom}!", Color::GREEN, Color::BOLD)
+          puts "\nYou can now run:"
+          puts "   #{Color.c('gsc ga4', Color::CYAN)}             - Landing page bounce rates, engagement rates & duration"
+          puts "   #{Color.c('gsc correlation', Color::CYAN)}     - Merged GSC keyword rankings + GA4 on-site retention"
+          puts "   #{Color.c('gsc audit', Color::CYAN)}           - Comprehensive 5-step SEO & GA4 health audit"
+        else
+          puts Color.c("\n⚠️ Live test returned error (#{test_res[:status]}): #{test_res.dig(:data, 'error', 'message')}", Color::YELLOW)
+          print "Save Property ID anyway? [y/N]: "
+          choice = $stdin.gets&.strip
+          if choice =~ /^y/i
+            Config.set_ga4_property_id(clean_id, target_dom)
+            puts Color.c("💾 Saved Property ID #{clean_id} for #{target_dom}.", Color::GREEN)
+            puts "Make sure to enable the API in Google Cloud and grant Viewer role in GA4 Admin."
+          else
+            puts Color.c("Setup aborted.", Color::YELLOW)
+          end
+        end
+      rescue StandardError => e
+        puts Color.c("\n❌ OAuth / Network Error: #{e.message}", Color::RED)
+      end
+      puts
+    end
+
     def self.handle_open_command
       dir = Config::CONFIG_DIR
       FileUtils.mkdir_p(dir)
       puts "📂 Opening #{Color.c(dir, Color::CYAN)} in Finder..."
       if RUBY_PLATFORM =~ /darwin/
-        system("open '#{dir}'")
+        system('open', dir)
       elsif RUBY_PLATFORM =~ /linux/
-        system("xdg-open '#{dir}' 2>/dev/null || open '#{dir}' 2>/dev/null")
+        system('xdg-open', dir, out: File::NULL, err: File::NULL) || system('open', dir, out: File::NULL, err: File::NULL)
       end
     end
 
@@ -1353,12 +3297,14 @@ module GSC
     def self.handle_update_command(options)
       repo_url = Config.load['update_url'] || ENV['GSC_UPDATE_URL'] || DEFAULT_UPDATE_URL
 
+      uri = URI(repo_url)
+      raise "Security Error: Update URL must use HTTPS: #{repo_url}" unless uri.scheme == 'https'
+
       puts "🔄 Checking for updates from: #{Color.c(repo_url, Color::CYAN)}..." unless options[:json]
 
       begin
-        uri = URI(repo_url)
         http = Net::HTTP.new(uri.host, uri.port)
-        http.use_ssl = (uri.scheme == 'https')
+        http.use_ssl = true
         http.open_timeout = 6
         http.read_timeout = 10
 
@@ -1388,7 +3334,7 @@ module GSC
         temp.write(remote_script)
         temp.close
 
-        syntax_ok = system("ruby -c '#{temp.path}' >/dev/null 2>&1")
+        syntax_ok = system('ruby', '-c', temp.path, out: File::NULL, err: File::NULL)
         unless syntax_ok
           temp.unlink
           raise "Downloaded script failed Ruby syntax verification."
@@ -1544,24 +3490,96 @@ module GSC
       puts
     end
 
+    def self.fetch_available_domains
+      domains = []
+      key_path = Auth.find_key
+      if key_path && File.exist?(key_path)
+        begin
+          sa = JSON.parse(File.read(key_path))
+          token = Auth.fetch_access_token(sa)
+          client = Client.new(token: token)
+          api = API.new(client)
+          res = api.list_sites
+          if res[:ok]
+            (res.dig(:data, 'siteEntry') || []).each do |s|
+              clean = s['siteUrl'].sub(%r{^https?://}, '').sub(/^sc-domain:/, '').chomp('/')
+              domains << clean unless domains.include?(clean)
+            end
+          end
+        rescue StandardError
+          # fallback to config
+        end
+      end
+
+      Config.ga4_properties.keys.each do |d|
+        domains << d unless domains.include?(d)
+      end
+
+      domains.sort
+    end
+
     def self.handle_use_command(domain_arg, options)
+      domains = fetch_available_domains
+      active = Config.default_domain
+
       if domain_arg.nil? || domain_arg.empty?
-        active = Config.default_domain
         if options[:json]
-          puts JSON.pretty_generate({ activeDomain: active })
+          puts JSON.pretty_generate({ activeDomain: active, availableDomains: domains })
           return
         end
+
         puts BANNER
         if active
-          puts "Current active domain is: #{Color.c(active, Color::GREEN, Color::BOLD)}"
-          puts "To switch domains, run: #{Color.c('gsc use <domain>', Color::CYAN)}"
+          puts "Current active domain is: #{Color.c(active, Color::GREEN, Color::BOLD)}\n\n"
         else
-          puts Color.c("No active domain is currently set.", Color::YELLOW)
-          puts "Usage: gsc use <domain>"
-          puts "Example: gsc use example.com"
+          puts Color.c("No active domain is currently set.\n\n", Color::YELLOW)
         end
-        puts
-        return
+
+        if domains.empty?
+          puts "No domains configured or accessible yet."
+          puts "Usage: gsc use <domain>"
+          return
+        end
+
+        puts "#{Color::BOLD} #  | Domain                       | GA4 Link Status#{Color::RESET}"
+        puts "------------------------------------------------------------------"
+        domains.each_with_index do |dom, idx|
+          num_str = Color.c("[#{idx + 1}]".ljust(4), Color::CYAN, Color::BOLD)
+          ga4_id = Config.ga4_property_id(dom)
+          ga4_str = ga4_id ? Color.c("[GA4: #{ga4_id}]", Color::MAGENTA) : Color.c("[GA4: Not linked]", Color::GRAY)
+          suffix = (dom == active) ? " #{Color.c('👈 [ACTIVE]', Color::GREEN, Color::BOLD)}" : ""
+          puts "#{num_str}| #{dom.ljust(28)} | #{ga4_str}#{suffix}"
+        end
+        puts "------------------------------------------------------------------"
+
+        if $stdin.tty?
+          print "\nSelect domain number (1-#{domains.size}) to switch active, or press Enter to keep current: "
+          choice = $stdin.gets&.strip
+          if choice && choice =~ /^\d+$/
+            num = choice.to_i
+            if num >= 1 && num <= domains.size
+              domain_arg = domains[num - 1]
+            else
+              puts Color.c("Invalid selection.", Color::YELLOW)
+              return
+            end
+          elsif choice && !choice.empty? && choice != 'q'
+            domain_arg = choice
+          else
+            return
+          end
+        else
+          puts "\nTo switch domains, run: #{Color.c('gsc use <number|domain>', Color::CYAN)}"
+          return
+        end
+      elsif domain_arg =~ /^\d+$/
+        num = domain_arg.to_i
+        if num >= 1 && num <= domains.size
+          domain_arg = domains[num - 1]
+        else
+          puts Color.c("❌ Error: Invalid domain number #{num}. Must be between 1 and #{domains.size}.", Color::RED)
+          exit 1
+        end
       end
 
       clean = Config.set_default_domain(domain_arg)
@@ -1606,7 +3624,9 @@ module GSC
         end
         dest = File.join(Config::CONFIG_DIR, 'service-account.json')
         FileUtils.mkdir_p(Config::CONFIG_DIR)
+        File.chmod(0700, Config::CONFIG_DIR) rescue nil
         FileUtils.cp(subvalue, dest)
+        File.chmod(0600, dest) rescue nil
         Config.set_key_path(dest)
         if options[:json]
           puts JSON.pretty_generate({ status: 'ok', keyPath: dest })
@@ -1629,6 +3649,34 @@ module GSC
         else
           puts BANNER
           puts Color.c("✅ Update source URL saved to: #{subvalue}", Color::GREEN, Color::BOLD)
+        end
+      when 'set-ga4', 'ga4'
+        if subvalue.nil? || subvalue.empty?
+          if options[:json]
+            puts JSON.pretty_generate({ error: 'Please specify a numeric GA4 Property ID' })
+          else
+            puts Color.c("❌ Error: Please specify a numeric GA4 Property ID.", Color::RED)
+            puts "Example: gsc config set-ga4 123456789 [-d example.com]"
+          end
+          exit 1
+        end
+        target_dom = options[:domain] || Config.default_domain
+        saved_id = Config.set_ga4_property_id(subvalue, target_dom)
+        if options[:json]
+          puts JSON.pretty_generate({ status: 'ok', domain: target_dom, ga4PropertyId: saved_id })
+        else
+          puts BANNER
+          dom_str = target_dom ? " for domain #{Color.c(target_dom, Color::CYAN)}" : ""
+          puts Color.c("✅ GA4 Property #{Color.c(saved_id, Color::MAGENTA, Color::BOLD)} linked#{dom_str}!", Color::GREEN, Color::BOLD)
+        end
+      when 'unlink-ga4'
+        target_dom = options[:domain] || Config.default_domain
+        Config.unlink_ga4_property(target_dom)
+        if options[:json]
+          puts JSON.pretty_generate({ status: 'ok', unlinkedDomain: target_dom })
+        else
+          puts BANNER
+          puts Color.c("✅ Unlinked GA4 property for domain #{Color.c(target_dom, Color::CYAN)}.", Color::GREEN)
         end
       else
         cfg = Config.load
@@ -1654,10 +3702,21 @@ module GSC
         else
           puts "   Key Location:    #{Color.c('Not found', Color::RED)}"
         end
+        puts "\n   #{Color::BOLD}Linked GA4 Properties per Domain:#{Color::RESET}"
+        ga4_props = cfg['ga4_properties'] || {}
+        if ga4_props.empty?
+          puts "      #{Color.c('(None linked yet. Use: gsc config set-ga4 <id> -d <domain>)', Color::GRAY)}"
+        else
+          ga4_props.each do |dom, pid|
+            active_star = (dom == cfg['default_domain']) ? " #{Color.c('👈 [ACTIVE]', Color::GREEN)}" : ""
+            puts "      • #{Color.c(dom, Color::CYAN)} ➔ #{Color.c(pid, Color::MAGENTA, Color::BOLD)}#{active_star}"
+          end
+        end
         puts
         puts "#{Color::BOLD}Configuration shortcuts:#{Color::RESET}"
         puts "   gsc connect                  Interactive setup wizard (drag & drop key)"
         puts "   gsc use <domain>             Set active default domain"
+        puts "   gsc config set-ga4 <id>      Link a GA4 Property ID to domain"
         puts "   gsc open                     Open config directory in Finder"
         puts "   gsc where                    Show install path and paths summary"
         puts
@@ -1737,9 +3796,804 @@ module GSC
       File.open(path, 'w') do |f|
         f.puts headers.join(',')
         rows.each do |row|
-          escaped = row.map { |v| "\"#{v.to_s.gsub('"', '""')}\"" }
+          escaped = row.map do |v|
+            str = v.to_s
+            # Mitigate CSV Formula Injection (prepend single quote if leading char is =, +, -, @, tab, or CR)
+            str = "'#{str}" if str =~ /\A[=+\-@\t\r]/
+            "\"#{str.gsub('"', '""')}\""
+          end
           f.puts escaped.join(',')
         end
+      end
+    end
+
+    def self.normalize_path(url_or_path)
+      return '/' if url_or_path.nil? || url_or_path.empty?
+      p = url_or_path.to_s.sub(%r{^https?://[^/]+}, '').split('?').first.split('#').first.downcase.chomp('/')
+      p.empty? ? '/' : p
+    end
+
+    def self.format_duration(seconds)
+      sec = seconds.to_i
+      return "0s" if sec <= 0
+      m = sec / 60
+      s = sec % 60
+      m > 0 ? "#{m}m #{s}s" : "#{s}s"
+    end
+
+    def self.expected_ctr_for(pos)
+      case pos
+      when 0.0...1.5 then 28.0
+      when 1.5...2.5 then 15.0
+      when 2.5...3.5 then 11.0
+      when 3.5...4.5 then 8.0
+      when 4.5...6.0 then 6.0
+      when 6.0...8.0 then 4.5
+      else 3.0
+      end
+    end
+
+    def self.format_number(n)
+      n.to_s.reverse.gsub(/(\d{3})(?=\d)/, '\\1,').reverse
+    end
+
+    COUNTRY_NAMES = {
+      'usa' => 'United States 🇺🇸',
+      'gbr' => 'United Kingdom 🇬🇧',
+      'can' => 'Canada 🇨🇦',
+      'aus' => 'Australia 🇦🇺',
+      'ind' => 'India 🇮🇳',
+      'bra' => 'Brazil 🇧🇷',
+      'deu' => 'Germany 🇩🇪',
+      'fra' => 'France 🇫🇷',
+      'esp' => 'Spain 🇪🇸',
+      'ita' => 'Italy 🇮🇹',
+      'mex' => 'Mexico 🇲🇽',
+      'jpn' => 'Japan 🇯🇵',
+      'kor' => 'South Korea 🇰🇷',
+      'nld' => 'Netherlands 🇳🇱',
+      'swe' => 'Sweden 🇸🇪',
+      'nor' => 'Norway 🇳🇴',
+      'dnk' => 'Denmark 🇩🇰',
+      'fin' => 'Finland 🇫🇮',
+      'che' => 'Switzerland 🇨🇭',
+      'aut' => 'Austria 🇦🇹',
+      'bel' => 'Belgium 🇧🇪',
+      'irl' => 'Ireland 🇮🇪',
+      'nzl' => 'New Zealand 🇳🇿',
+      'sgp' => 'Singapore 🇸🇬',
+      'hkg' => 'Hong Kong 🇭🇰',
+      'are' => 'UAE 🇦🇪',
+      'sau' => 'Saudi Arabia 🇸🇦',
+      'kwt' => 'Kuwait 🇰🇼',
+      'isr' => 'Israel 🇮🇱',
+      'tur' => 'Turkey 🇹🇷',
+      'pol' => 'Poland 🇵🇱',
+      'ukr' => 'Ukraine 🇺🇦',
+      'zaf' => 'South Africa 🇿🇦',
+      'col' => 'Colombia 🇨🇴',
+      'arg' => 'Argentina 🇦🇷',
+      'chl' => 'Chile 🇨🇱',
+      'per' => 'Peru 🇵🇪',
+      'pak' => 'Pakistan 🇵🇰',
+      'bgd' => 'Bangladesh 🇧🇩',
+      'phl' => 'Philippines 🇵🇭',
+      'vnm' => 'Vietnam 🇻🇳',
+      'tha' => 'Thailand 🇹🇭',
+      'mys' => 'Malaysia 🇲🇾',
+      'idn' => 'Indonesia 🇮🇩',
+      'chn' => 'China 🇨🇳',
+      'twn' => 'Taiwan 🇹🇼',
+      'prt' => 'Portugal 🇵🇹',
+      'grc' => 'Greece 🇬🇷',
+      'cze' => 'Czech Republic 🇨🇿',
+      'rou' => 'Romania 🇷🇴',
+      'hun' => 'Hungary 🇭🇺',
+      'egy' => 'Egypt 🇪🇬',
+      'nga' => 'Nigeria 🇳🇬',
+      'ken' => 'Kenya 🇰🇪',
+      'mar' => 'Morocco 🇲🇦',
+      'arm' => 'Armenia 🇦🇲',
+      'aze' => 'Azerbaijan 🇦🇿',
+      'bgr' => 'Bulgaria 🇧🇬',
+      'bhr' => 'Bahrain 🇧🇭',
+      'brn' => 'Brunei 🇧🇳',
+      'civ' => 'Ivory Coast 🇨🇮',
+      'cyp' => 'Cyprus 🇨🇾',
+      'dom' => 'Dominican Rep. 🇩🇴',
+      'dza' => 'Algeria 🇩🇿',
+      'gtm' => 'Guatemala 🇬🇹',
+      'hrv' => 'Croatia 🇭🇷',
+      'irn' => 'Iran 🇮🇷',
+      'irq' => 'Iraq 🇮🇶',
+      'jam' => 'Jamaica 🇯🇲',
+      'jor' => 'Jordan 🇯🇴',
+      'lby' => 'Libya 🇱🇾',
+      'ltu' => 'Lithuania 🇱🇹',
+      'lva' => 'Latvia 🇱🇻',
+      'est' => 'Estonia 🇪🇪',
+      'qat' => 'Qatar 🇶🇦',
+      'omn' => 'Oman 🇴🇲',
+      'srb' => 'Serbia 🇷🇸',
+      'svk' => 'Slovakia 🇸🇰',
+      'svn' => 'Slovenia 🇸🇮',
+      'isl' => 'Iceland 🇮🇸',
+      'lux' => 'Luxembourg 🇱🇺',
+      'lka' => 'Sri Lanka 🇱🇰',
+      'npl' => 'Nepal 🇳🇵',
+      'tun' => 'Tunisia 🇹🇳',
+      'gha' => 'Ghana 🇬🇭'
+    }.freeze
+
+    def self.format_country(code)
+      COUNTRY_NAMES[code.to_s.downcase] || code.to_s.upcase
+    end
+
+    def self.format_device(dev)
+      case dev.to_s.upcase
+      when 'DESKTOP' then '💻 Desktop'
+      when 'MOBILE'  then '📱 Mobile'
+      when 'TABLET'  then '📟 Tablet'
+      else dev.to_s.capitalize
+      end
+    end
+
+    APPEARANCE_NAMES = {
+      'REVIEW_SNIPPET'        => '⭐ Review Snippets',
+      'PRODUCT_SNIPPETS'      => '🏷️ Product Snippets',
+      'MERCHANT_LISTINGS'     => '🏪 Merchant Listings',
+      'PAGE_EXPERIENCE'       => '⚡ Page Experience',
+      'GOOD_PAGE_EXPERIENCE'  => '✅ Good Page Experience',
+      'FAQ'                   => '❓ FAQ Rich Results',
+      'VIDEO'                 => '🎥 Video Snippets',
+      'RECIPE'                => '🍲 Recipe Rich Results',
+      'EVENT'                 => '📅 Event Listings',
+      'HOW_TO'                => '📋 How-To Rich Results',
+      'SUBMIT_ACTION'         => '📝 Sitelinks Searchbox',
+      'AMP_ARTICLE'           => '⚡ AMP Article',
+      'ORGANIC_SHOPPING'      => '🛍️ Organic Shopping',
+      'TRANSLATED_RESULT'     => '🌐 Translated Result'
+    }.freeze
+
+    def self.format_appearance(type)
+      APPEARANCE_NAMES[type.to_s.upcase] || type.to_s.tr('_', ' ').capitalize
+    end
+
+    def self.print_devices_table(rows)
+      puts "\n#{Color::BOLD}📱 DEVICE BREAKDOWN (Search Traffic)#{Color::RESET}"
+      puts "Device       | Clicks   | Impressions | CTR    | Position | Clicks Share"
+      puts "-------------------------------------------------------------------------"
+      rows.each do |r|
+        d_name = format_device(r[:device]).ljust(12)
+        c_str = format_number(r[:clicks]).ljust(8)
+        i_str = format_number(r[:impressions]).ljust(11)
+        ctr_str = "#{r[:ctr]}%".ljust(6)
+        pos_str = r[:position].to_s.ljust(8)
+        share_str = r[:share].to_s
+        puts "#{d_name} | #{c_str} | #{i_str} | #{ctr_str} | #{pos_str} | #{share_str}"
+      end
+    end
+
+    def self.print_countries_table(rows)
+      puts "\n#{Color::BOLD}🌍 TOP COUNTRIES (Search Demand)#{Color::RESET}"
+      puts "Country                | Clicks   | Impressions | CTR    | Position"
+      puts "-------------------------------------------------------------------------"
+      rows.each do |r|
+        c_name = format_country(r[:country])[0..21].ljust(22)
+        c_str = format_number(r[:clicks]).ljust(8)
+        i_str = format_number(r[:impressions]).ljust(11)
+        ctr_str = "#{r[:ctr]}%".ljust(6)
+        pos_str = r[:position].to_s
+        puts "#{c_name} | #{c_str} | #{i_str} | #{ctr_str} | #{pos_str}"
+      end
+    end
+
+    def self.print_snippets_table(rows)
+      puts "\n#{Color::BOLD}✨ SEARCH APPEARANCE & RICH SNIPPETS#{Color::RESET}"
+      if rows.empty?
+        puts Color.c("  (No rich snippet enhancements detected in this date range)\n", Color::GRAY)
+      else
+        puts "Appearance Type        | Clicks   | Impressions | CTR    | Position"
+        puts "-------------------------------------------------------------------------"
+        rows.each do |r|
+          t_name = format_appearance(r[:type])[0..21].ljust(22)
+          c_str = format_number(r[:clicks]).ljust(8)
+          i_str = format_number(r[:impressions]).ljust(11)
+          ctr_str = "#{r[:ctr]}%".ljust(6)
+          pos_str = r[:position].to_s
+          puts "#{t_name} | #{c_str} | #{i_str} | #{ctr_str} | #{pos_str}"
+        end
+      end
+    end
+
+    def self.print_cities_table(rows, property_id = nil)
+      prop_label = property_id ? " [Property #{property_id}]" : ""
+      puts "\n#{Color::BOLD}🏙️ TOP CITIES & ON-SITE ENGAGEMENT#{prop_label}#{Color::RESET}"
+      if rows.empty?
+        puts Color.c("  (No city-level behavioral data available in GA4)\n", Color::GRAY)
+      else
+        puts "City                 | Country            | Sessions | Bounce | Avg Time"
+        puts "-------------------------------------------------------------------------"
+        rows.each do |r|
+          city_str = r[:city][0..19].ljust(20)
+          cntry_str = r[:country][0..17].ljust(18)
+          sess_str = format_number(r[:sessions]).ljust(8)
+          bounce_str = "#{r[:bounce_rate]}".ljust(6)
+          dur_str = r[:duration].to_s
+          puts "#{city_str} | #{cntry_str} | #{sess_str} | #{bounce_str} | #{dur_str}"
+        end
+      end
+    end
+
+    def self.print_mini_queries_table(rows)
+      puts "\n#{Color::BOLD}🔍 TOP SEARCH QUERIES#{Color::RESET}"
+      puts "Clicks | Impressions | CTR    | Position | Query"
+      puts "-------------------------------------------------------------------------"
+      rows.each do |r|
+        c_str = format_number(r[:clicks]).ljust(6)
+        i_str = format_number(r[:impressions]).ljust(11)
+        ctr_str = "#{r[:ctr]}%".ljust(6)
+        pos_str = r[:position].to_s.ljust(8)
+        q_str = Color.c(r[:query], Color::YELLOW)
+        puts "#{c_str} | #{i_str} | #{ctr_str} | #{pos_str} | #{q_str}"
+      end
+    end
+
+    def self.print_mini_pages_table(rows)
+      puts "\n#{Color::BOLD}📄 TOP LANDING PAGES#{Color::RESET}"
+      puts "Clicks | Impressions | CTR    | Position | Page Path"
+      puts "-------------------------------------------------------------------------"
+      rows.each do |r|
+        c_str = format_number(r[:clicks]).ljust(6)
+        i_str = format_number(r[:impressions]).ljust(11)
+        ctr_str = "#{r[:ctr]}%".ljust(6)
+        pos_str = r[:position].to_s.ljust(8)
+        p_str = Color.c(r[:path], Color::CYAN)
+        puts "#{c_str} | #{i_str} | #{ctr_str} | #{pos_str} | #{p_str}"
+      end
+    end
+
+    def self.run_comprehensive_audit(api, site_url, hostname, https_origin, options)
+      days = options[:days] || 30
+      puts "🔍 Running 360° Comprehensive SEO & Growth Audit for #{Color.c(hostname, Color::CYAN)} (Past #{days} days)...\n" unless options[:json]
+
+      # 1. Check Sites Permission
+      sites_res = api.list_sites
+      access_ok = false
+      if sites_res[:ok]
+        entries = sites_res.dig(:data, 'siteEntry') || []
+        access_ok = entries.any? { |s| s['siteUrl'] == site_url || s['siteUrl'].include?(hostname) }
+      end
+
+      # 2. Performance Totals
+      perf_res = api.query_analytics(site_url, days: days, dimensions: [])
+      perf_row = perf_res.dig(:data, 'rows', 0) || { 'clicks' => 0, 'impressions' => 0, 'ctr' => 0, 'position' => 0 }
+      total_clicks = perf_row['clicks'] || 0
+      total_imp    = perf_row['impressions'] || 0
+      avg_ctr      = ((perf_row['ctr'] || 0) * 100).round(2)
+      avg_pos      = (perf_row['position'] || 0).round(1)
+
+      # 3. Homepage Live Inspection
+      home_res = api.inspect_url("#{https_origin}/", site_url)
+      idx_res = home_res.dig(:data, 'inspectionResult', 'indexStatusResult') || {}
+      verdict          = idx_res['verdict'] || 'UNKNOWN'
+      coverage         = idx_res['coverageState'] || 'Unknown'
+      google_canonical = idx_res['googleCanonical'] || "#{https_origin}/"
+      user_canonical   = idx_res['userCanonical'] || "#{https_origin}/"
+      crawled_as       = idx_res['crawlingUserAgent'] || idx_res['crawledAs'] || 'Googlebot Mobile'
+      last_crawl_raw   = idx_res['lastCrawlTime']
+      last_crawl       = last_crawl_raw ? last_crawl_raw.split('T').first : 'Unknown'
+      canonical_match  = google_canonical.chomp('/') == user_canonical.chomp('/') || google_canonical.include?(hostname)
+
+      # 4. Registered Sitemaps
+      sm_res = api.list_sitemaps(site_url)
+      sitemaps = sm_res[:ok] ? (sm_res.dig(:data, 'sitemap') || []) : []
+      sm_errors = sitemaps.sum { |s| (s['errors'] || 0).to_i }
+      sm_warnings = sitemaps.sum { |s| (s['warnings'] || 0).to_i }
+
+      # 5. Queries & Pages Analytics (500 rows)
+      qp_res = api.query_analytics(site_url, days: days, dimensions: %w[query page], row_limit: 500)
+      qp_rows = qp_res[:ok] ? (qp_res.dig(:data, 'rows') || []) : []
+
+      # 5a. Striking Distance Opportunities (pos 7.0..20.0, min 5 imp)
+      opportunities = qp_rows.select { |r| r['position'] >= 7.0 && r['position'] <= 20.0 && r['impressions'] >= 5 }
+                             .map do |r|
+                               c = r['clicks'] || 0
+                               i = r['impressions'] || 0
+                               pos = r['position'].round(1)
+                               potential_clicks = [((i * 0.12) - c).round, 1].max
+                               score = (potential_clicks * (1.0 / [pos - 2.0, 1.0].max) * 10.0).round(1)
+                               { query: r['keys'][0], page: r['keys'][1], position: pos, impressions: i, clicks: c, potential_gain: potential_clicks, score: score }
+                             end.sort_by { |o| -o[:score] }.first(5)
+
+      # 5b. CTR Click-Bleed Underperformers (pos <= 10.0, min 15 imp, actual < exp * 0.70)
+      underperformers = qp_rows.select { |r| r['position'] <= 10.0 && r['impressions'] >= 15 }
+                               .map do |r|
+                                 pos_val = r['position'].round(1)
+                                 actual = ((r['ctr'] || 0) * 100).round(2)
+                                 exp = expected_ctr_for(pos_val)
+                                 gap = (exp - actual).round(2)
+                                 lost = [((r['impressions'] * (gap / 100.0))).round, 1].max
+                                 { query: r['keys'][0], page: r['keys'][1], position: pos_val, impressions: r['impressions'], clicks: r['clicks'], actual_ctr: actual, expected_ctr: exp, gap: gap, lost_clicks: lost }
+                               end.select { |u| u[:gap] >= 2.0 && u[:actual_ctr] < (u[:expected_ctr] * 0.70) }
+                               .sort_by { |u| -u[:lost_clicks] }.first(5)
+
+      # 5c. Keyword Cannibalization (queries with > 1 distinct pages)
+      by_query = qp_rows.group_by { |r| r['keys'][0] }
+      cannibalized = by_query.select { |_q, list| list.map { |r| r['keys'][1] }.uniq.size > 1 }
+                             .map do |q, list|
+                               pages = list.map do |r|
+                                 { page: r['keys'][1], impressions: r['impressions'], clicks: r['clicks'], position: r['position'].round(1) }
+                               end.sort_by { |p| -p[:impressions] }
+                               total_q_imp = pages.sum { |p| p[:impressions] }
+                               { query: q, total_impressions: total_q_imp, pages: pages }
+                             end.sort_by { |c| -c[:total_impressions] }.first(3)
+
+      # 6. Device Breakdown
+      dev_res = api.query_analytics(site_url, days: days, dimensions: ['device'])
+      devices_data = (dev_res[:ok] ? (dev_res.dig(:data, 'rows') || []) : []).map do |r|
+        c = r['clicks'] || 0
+        i = r['impressions'] || 0
+        ctr = ((r['ctr'] || 0) * 100).round(2)
+        pos = (r['position'] || 0).round(1)
+        share = total_clicks > 0 ? "#{(c.to_f / total_clicks * 100).round(1)}%" : "-"
+        { device: r['keys'].first, clicks: c, impressions: i, ctr: ctr, position: pos, share: share }
+      end.sort_by { |r| -r[:clicks] }
+
+      desk_dev = devices_data.find { |d| d[:device] == 'DESKTOP' }
+      mob_dev  = devices_data.find { |d| d[:device] == 'MOBILE' }
+      mobile_deficit = desk_dev && mob_dev && desk_dev[:ctr] >= 1.0 && mob_dev[:ctr] < (desk_dev[:ctr] * 0.6)
+
+      # 7. Search Appearance & Rich Snippets
+      snip_res = api.query_analytics(site_url, days: days, dimensions: ['searchAppearance'], row_limit: 10)
+      snippets_data = (snip_res[:ok] ? (snip_res.dig(:data, 'rows') || []) : []).map do |r|
+        { type: r['keys'].first, clicks: r['clicks'] || 0, impressions: r['impressions'] || 0, ctr: ((r['ctr'] || 0) * 100).round(2), position: (r['position'] || 0).round(1) }
+      end
+
+      # 8. GA4 Behavioral Metrics
+      ga4_prop = options[:property] || Config.ga4_property_id(hostname)
+      ga4_data = nil
+      high_bounce_pages = []
+      if ga4_prop
+        ga4_res = api.query_ga4_report(ga4_prop, days: days, limit: 50, hostname: (options[:all_hosts] ? nil : hostname), site_only: options[:site_only])
+        if ga4_res[:ok]
+          raw_ga4 = ga4_res.dig(:data, 'rows') || []
+          tot_sess = raw_ga4.sum { |r| r.dig('metricValues', 0, 'value').to_i }
+          tot_bounce = raw_ga4.sum { |r| r.dig('metricValues', 3, 'value').to_f * r.dig('metricValues', 0, 'value').to_i }
+          overall_bounce = tot_sess.positive? ? (tot_bounce / tot_sess * 100.0).round(1) : 0.0
+          tot_dur = raw_ga4.sum { |r| r.dig('metricValues', 4, 'value').to_f * r.dig('metricValues', 0, 'value').to_i }
+          overall_dur = tot_sess.positive? ? (tot_dur / tot_sess).round : 0
+
+          high_bounce_pages = raw_ga4.map do |r|
+            path = r.dig('dimensionValues', 0, 'value')
+            sess = r.dig('metricValues', 0, 'value').to_i
+            bounce = ((r.dig('metricValues', 3, 'value') || 0).to_f * 100).round(1)
+            dur = (r.dig('metricValues', 4, 'value') || 0).to_f.round
+            { path: path, sessions: sess, bounce_rate: bounce, duration: format_duration(dur) }
+          end.select { |p| p[:sessions] >= 10 && p[:bounce_rate] >= 80.0 }.sort_by { |p| -p[:sessions] }.first(5)
+
+          ga4_data = {
+            linked: true,
+            property_id: ga4_prop,
+            sessions: tot_sess,
+            bounce_rate: overall_bounce,
+            avg_duration_sec: overall_dur,
+            avg_duration: format_duration(overall_dur),
+            high_bounce_pages: high_bounce_pages
+          }
+        end
+      end
+
+      # 9. Compute Overall SEO Health Score
+      score = 100
+      score -= 20 if verdict != 'PASS'
+      score -= 10 if sitemaps.empty?
+      score -= 10 if sm_errors > 0
+      score -= 10 unless canonical_match
+      score -= 15 if avg_ctr < 0.5
+      score -= 10 if avg_ctr >= 0.5 && avg_ctr < 1.0
+      score -= 10 if avg_pos > 30.0
+      score -= [underperformers.size * 5, 10].min
+      score -= [cannibalized.size * 5, 10].min
+      score -= 5 if mobile_deficit
+      if ga4_data && ga4_data[:sessions] > 0
+        score -= 15 if ga4_data[:bounce_rate] > 85.0
+        score -= 10 if ga4_data[:bounce_rate] > 75.0 && ga4_data[:bounce_rate] <= 85.0
+        score += 5  if ga4_data[:bounce_rate] <= 60.0
+      end
+      score += 5 unless snippets_data.empty?
+      score = [[score, 20].max, 100].min
+
+      grade = case score
+              when 88..100 then 'A'
+              when 75...88 then 'B'
+              when 60...75 then 'C'
+              else 'D'
+              end
+
+      grade_label = case grade
+                    when 'A' then 'EXCELLENT - DOMINATING SERPS'
+                    when 'B' then 'GOOD - HIGH-LEVERAGE GROWTH WINS AVAILABLE'
+                    when 'C' then 'NEEDS ATTENTION - CLICK BLEED & CONFLICTS DETECTED'
+                    else 'CRITICAL - INDEXING, CANNIBALIZATION OR RETENTION FRICTION'
+                    end
+
+      # 10. Prioritized Action Plan Engine
+      action_plan = []
+
+      # High Priority
+      if cannibalized.any?
+        top_c = cannibalized.first
+        conflicting_pages = top_c[:pages].map { |p| p[:page].sub(%r{^https?://[^/]+}, '') }
+        action_plan << {
+          priority: 'high',
+          title: "Consolidate Keyword Cannibalization on \"#{top_c[:query]}\"",
+          detail: "Search intent is split across #{top_c[:pages].size} competing URLs (#{conflicting_pages.join(', ')}). Consolidate internal links and canonical signals to #{top_c[:pages].first[:page].sub(%r{^https?://[^/]+}, '')} to unify Page 1 ranking power."
+        }
+      end
+
+      if underperformers.any?
+        top_u = underperformers.first
+        action_plan << {
+          priority: 'high',
+          title: "Recover ~#{top_u[:lost_clicks]} Lost Clicks/mo on \"#{top_u[:query]}\"",
+          detail: "Currently ranking Pos #{top_u[:position]} on #{top_u[:page].sub(%r{^https?://[^/]+}, '')} with #{top_u[:actual_ctr]}% CTR (expected benchmark ~#{top_u[:expected_ctr]}%). Rewrite `<title>` and meta description with numbers or benefit hooks to double click-through."
+        }
+      end
+
+      if sm_errors > 0
+        err_sm = sitemaps.find { |s| (s['errors'] || 0).to_i > 0 }
+        action_plan << {
+          priority: 'high',
+          title: "Resolve Sitemap Errors in Search Console",
+          detail: "Sitemap #{err_sm['path']} has #{err_sm['errors']} errors. Clean up 404s or resubmit current sitemap-index.xml."
+        }
+      end
+
+      if verdict != 'PASS'
+        action_plan << {
+          priority: 'high',
+          title: "Resolve Homepage Indexation Blocker",
+          detail: "Homepage Googlebot verdict is #{verdict} (#{coverage}). Inspect URL in Search Console to resolve indexing eligibility."
+        }
+      end
+
+      # Medium Priority
+      if opportunities.any?
+        top_o = opportunities.first
+        action_plan << {
+          priority: 'medium',
+          title: "Push Striking-Distance Keyword \"#{top_o[:query]}\" to Top 3",
+          detail: "Currently Pos #{top_o[:position]} with #{top_o[:impressions]} impressions on #{top_o[:page].sub(%r{^https?://[^/]+}, '')}. Add a dedicated H2 section and clear answering copy to unlock ~+#{top_o[:potential_gain]} clicks/mo."
+        }
+      end
+
+      if high_bounce_pages.any?
+        top_hb = high_bounce_pages.first
+        action_plan << {
+          priority: 'medium',
+          title: "Address High Bounce Rate (#{top_hb[:bounce_rate]}%) on #{top_hb[:path]}",
+          detail: "Page received #{top_hb[:sessions]} sessions with #{top_hb[:duration]} average time. Audit above-the-fold LCP speed and ensure page content directly satisfies searcher intent."
+        }
+      end
+
+      if mobile_deficit
+        action_plan << {
+          priority: 'medium',
+          title: "Audit Mobile Viewport & Responsive CTR",
+          detail: "Mobile CTR (#{mob_dev[:ctr]}%) is significantly trailing Desktop (#{desk_dev[:ctr]}%). Test page on real devices for mobile layout shift, font readability, or button touch targets."
+        }
+      end
+
+      # Quick Wins / Optimization
+      if snippets_data.empty?
+        action_plan << {
+          priority: 'low',
+          title: "Implement Structured Data (Schema.org)",
+          detail: "No rich snippet enhancements active. Add Product, FAQ, or Organization JSON-LD markup to earn rich SERP real estate."
+        }
+      else
+        snippet_labels = snippets_data.map { |s| format_appearance(s[:type]) }.join(', ')
+        action_plan << {
+          priority: 'low',
+          title: "Maintain Rich Snippets",
+          detail: "#{snippet_labels} currently active. Monitor Google Rich Results Test to maintain snippet coverage."
+        }
+      end
+
+      audit_payload = {
+        domain: hostname,
+        siteUrl: site_url,
+        healthScore: score,
+        grade: grade,
+        gradeLabel: grade_label,
+        days: days,
+        totals: {
+          clicks: total_clicks,
+          impressions: total_imp,
+          ctr: avg_ctr,
+          position: avg_pos
+        },
+        technical: {
+          homepageVerdict: verdict,
+          coverageState: coverage,
+          googleCanonical: google_canonical,
+          userCanonical: user_canonical,
+          canonicalMatch: canonical_match,
+          crawledAs: crawled_as,
+          lastCrawl: last_crawl,
+          sitemapsCount: sitemaps.size,
+          sitemapsErrors: sm_errors,
+          sitemapsWarnings: sm_warnings,
+          sitemaps: sitemaps
+        },
+        opportunities: opportunities,
+        underperformers: underperformers,
+        cannibalization: cannibalized,
+        devices: devices_data,
+        mobileDeficit: mobile_deficit,
+        snippets: snippets_data,
+        ga4: ga4_data,
+        actionPlan: action_plan
+      }
+
+      if options[:json]
+        puts JSON.pretty_generate(audit_payload)
+      else
+        print_comprehensive_audit(audit_payload)
+
+        if options[:csv]
+          csv_rows = action_plan.map { |a| [a[:priority], a[:title], a[:detail]] }
+          write_csv(options[:csv], %w[Priority Title Recommendation], csv_rows)
+          puts Color.c("📁 Exported prioritized action plan to #{options[:csv]}\n", Color::CYAN)
+        end
+      end
+    end
+
+    def self.print_comprehensive_audit(d)
+      score = d[:healthScore]
+      score_colored = if score >= 80
+        Color.c("#{score} / 100", Color::GREEN, Color::BOLD)
+      elsif score >= 65
+        Color.c("#{score} / 100", Color::YELLOW, Color::BOLD)
+      else
+        Color.c("#{score} / 100", Color::RED, Color::BOLD)
+      end
+
+      puts "#{Color::BOLD}══════════════════════════════════════════════════════════════════════════════#{Color::RESET}"
+      puts "#{Color::BOLD}🎯 OVERALL SEO HEALTH SCORE: #{score_colored} #{Color::BOLD}[GRADE #{d[:grade]} - #{d[:gradeLabel]}]#{Color::RESET}"
+      puts "#{Color::BOLD}══════════════════════════════════════════════════════════════════════════════#{Color::RESET}"
+
+      idx_status = d[:technical][:homepageVerdict] == 'PASS' ? Color.c('✅ PASS (100% Eligible)', Color::GREEN) : Color.c("⚠️ #{d[:technical][:homepageVerdict]}", Color::YELLOW)
+      ctr_status = d[:totals][:ctr] >= 1.5 ? Color.c("✅ #{d[:totals][:ctr]}% CTR (Healthy)", Color::GREEN) : Color.c("⚠️ #{d[:totals][:ctr]}% CTR (Below Benchmark)", Color::YELLOW)
+      cann_status = d[:cannibalization].empty? ? Color.c('✅ 0 Conflicts', Color::GREEN) : Color.c("🔴 #{d[:cannibalization].size} Query Conflicts Detected", Color::RED, Color::BOLD)
+
+      bounce_status = if d[:ga4] && d[:ga4][:linked] && d[:ga4][:sessions] > 0
+        b = d[:ga4][:bounce_rate]
+        b <= 65.0 ? Color.c("✅ #{b}% Bounce Rate (Strong)", Color::GREEN) : (b <= 80.0 ? Color.c("🟡 #{b}% Bounce Rate (Moderate)", Color::YELLOW) : Color.c("🔴 #{b}% Bounce Rate (High)", Color::RED, Color::BOLD))
+      else
+        Color.c('ℹ️ GA4 Not Linked', Color::GRAY)
+      end
+
+      puts "  • Technical Indexing:    #{idx_status}"
+      puts "  • SERP Click Efficiency: #{ctr_status}"
+      puts "  • SERP Cannibalization:  #{cann_status}"
+      puts "  • On-Site Retention:     #{bounce_status}"
+      puts "#{Color::BOLD}══════════════════════════════════════════════════════════════════════════════#{Color::RESET}\n"
+
+      # 1. 30-Day Performance Overview
+      puts "#{Color::BOLD}📊 30-DAY PERFORMANCE OVERVIEW#{Color::RESET}"
+      puts "  • Organic Search Clicks:     #{Color.c(format_number(d[:totals][:clicks]), Color::GREEN, Color::BOLD)}"
+      puts "  • Total SERP Impressions:    #{Color.c(format_number(d[:totals][:impressions]), Color::MAGENTA, Color::BOLD)}"
+      puts "  • Average Search Position:   #{Color.c(d[:totals][:position].to_s, Color::YELLOW, Color::BOLD)}"
+      puts "  • Average SERP CTR:          #{Color.c("#{d[:totals][:ctr]}%", Color::CYAN, Color::BOLD)}"
+      if d[:ga4] && d[:ga4][:linked] && d[:ga4][:sessions] > 0
+        puts "  • GA4 Total Sessions:        #{Color.c(format_number(d[:ga4][:sessions]), Color::MAGENTA, Color::BOLD)} [Property #{d[:ga4][:property_id]}]"
+        puts "  • GA4 Average Bounce Rate:   #{Color.c("#{d[:ga4][:bounce_rate]}%", Color::YELLOW, Color::BOLD)}"
+        puts "  • GA4 Avg Session Duration:  #{Color.c(d[:ga4][:avg_duration].to_s, Color::CYAN, Color::BOLD)}"
+      end
+      puts
+
+      # 2. Technical Crawl & Indexation Health
+      tech = d[:technical]
+      puts "#{Color::BOLD}🛠️  1. TECHNICAL CRAWL & INDEXATION HEALTH#{Color::RESET}"
+      v_color = tech[:homepageVerdict] == 'PASS' ? Color.c('✅ PASS (Indexed & Eligible for SERPs)', Color::GREEN, Color::BOLD) : Color.c("⚠️ #{tech[:homepageVerdict]}", Color::RED, Color::BOLD)
+      puts "  • Homepage Googlebot Verdict:  #{v_color}"
+      puts "  • Google Index Coverage State: #{tech[:coverageState]}"
+      c_match = tech[:canonicalMatch] ? Color.c("Matches declared canonical", Color::GREEN) : Color.c("⚠️ Canonical Mismatch Detected", Color::YELLOW)
+      puts "  • Google-Selected Canonical:   #{tech[:googleCanonical]} (#{c_match})"
+      puts "  • Crawl User-Agent:            Googlebot #{tech[:crawledAs]} (Mobile-First Indexing)"
+      puts "  • Last Googlebot Crawl:        #{tech[:lastCrawl]}"
+      sm_text = tech[:sitemapsCount] > 0 ? Color.c("#{tech[:sitemapsCount]} registered in Search Console", Color::GREEN) : Color.c("⚠️ No sitemaps found", Color::YELLOW)
+      puts "  • XML Sitemaps:                #{sm_text}"
+      if tech[:sitemapsErrors] > 0
+        err_sms = tech[:sitemaps].select { |s| (s['errors'] || 0).to_i > 0 }
+        err_sms.each do |sm|
+          last_dl = sm['lastDownloaded'] ? sm['lastDownloaded'].split('T').first : 'Unknown'
+          puts "    #{Color.c("⚠️ Notice: #{sm['path']} has #{sm['errors']} error (Last downloaded: #{last_dl}).", Color::YELLOW)}"
+        end
+      end
+      puts
+
+      # 3. Striking Distance Opportunities
+      puts "#{Color::BOLD}🎯 2. HIGH-IMPACT STRIKING-DISTANCE KEYWORDS (Page 2 ➔ Page 1 Quick Wins)#{Color::RESET}"
+      if d[:opportunities].empty?
+        puts Color.c("  ℹ️ No striking-distance queries found (pos 7–20 with >= 5 impressions).", Color::GRAY)
+      else
+        puts "Pos   | Impressions | Clicks | Est. Unlock  | Target Query & Landing Page"
+        puts "--------------------------------------------------------------------------------"
+        d[:opportunities].each do |o|
+          pos_str  = o[:position].to_s.ljust(5)
+          imp_str  = format_number(o[:impressions]).ljust(11)
+          c_str    = format_number(o[:clicks]).ljust(6)
+          gain_str = "+#{format_number(o[:potential_gain])}/mo".ljust(12)
+          page_short = o[:page].sub(%r{^https?://[^/]+}, '')
+          page_short = '/' if page_short.empty?
+          puts "#{Color.c(pos_str, Color::YELLOW)} | #{imp_str} | #{c_str} | #{Color.c(gain_str, Color::GREEN, Color::BOLD)} | #{Color.c(o[:query], Color::BOLD)} ➔ #{Color.c(page_short, Color::CYAN)}"
+        end
+        puts "💡 #{Color::BOLD}Action:#{Color::RESET} Add an H2 subheading and dedicated answering copy on these pages to push into the Top 3."
+      end
+      puts
+
+      # 4. CTR Click-Bleed & Hook Deficits
+      puts "#{Color::BOLD}⚡ 3. CTR CLICK-BLEED & TITLE HOOK DEFICITS (Top 10 Rankings)#{Color::RESET}"
+      if d[:underperformers].empty?
+        puts Color.c("  ✅ No critical Top 10 CTR click-bleed detected. Existing Page 1 rankings are converting at or above expected benchmarks.", Color::GREEN)
+      else
+        puts "Pos   | Impressions | Actual CTR | Expected | Lost Clicks  | Target Query & Landing Page"
+        puts "----------------------------------------------------------------------------------------"
+        d[:underperformers].each do |u|
+          pos_str  = u[:position].to_s.ljust(5)
+          imp_str  = format_number(u[:impressions]).ljust(11)
+          act_str  = "#{u[:actual_ctr]}%".ljust(10)
+          exp_str  = "~#{u[:expected_ctr]}%".ljust(8)
+          lost_str = "~#{format_number(u[:lost_clicks])}/mo".ljust(12)
+          page_short = u[:page].sub(%r{^https?://[^/]+}, '')
+          page_short = '/' if page_short.empty?
+          puts "#{Color.c(pos_str, Color::GREEN)} | #{imp_str} | #{Color.c(act_str, Color::RED)} | #{exp_str} | #{Color.c(lost_str, Color::YELLOW, Color::BOLD)} | #{Color.c(u[:query], Color::BOLD)} ➔ #{Color.c(page_short, Color::CYAN)}"
+        end
+        puts "💡 #{Color::BOLD}Action:#{Color::RESET} Rewrite the <title> tag and meta description with numbers, brackets, or clear benefit hooks to recover lost clicks immediately."
+      end
+      puts
+
+      # 5. Keyword Cannibalization
+      puts "#{Color::BOLD}🔀 4. KEYWORD CANNIBALIZATION (Multiple URLs Splitting SERP Equity)#{Color::RESET}"
+      if d[:cannibalization].empty?
+        puts Color.c("  ✅ Clean URL architecture! No internal keyword cannibalization detected.", Color::GREEN)
+      else
+        d[:cannibalization].each do |c|
+          puts "  #{Color.c('⚠️ Conflict:', Color::RED, Color::BOLD)} Query #{Color.c("\"#{c[:query]}\"", Color::BOLD)} (#{format_number(c[:total_impressions])} total imp) split across #{c[:pages].size} competing URLs:"
+          c[:pages].each do |p|
+            p_short = p[:page].sub(%r{^https?://[^/]+}, '')
+            p_short = '/' if p_short.empty?
+            puts "     ↳ Pos #{p[:position].to_s.ljust(4)} (#{format_number(p[:impressions]).rjust(4)} imp, #{p[:clicks]} clicks) ➔ #{Color.c(p_short, Color::CYAN)}"
+          end
+        end
+        puts "  💡 #{Color::BOLD}Fix:#{Color::RESET} Consolidate canonical signals or point internal links to 1 primary URL to concentrate ranking authority."
+      end
+      puts
+
+      # 6. Device Experience & Parity
+      puts "#{Color::BOLD}📱 5. DEVICE EXPERIENCE & SERP PARITY#{Color::RESET}"
+      puts "Device       | Clicks   | Impressions | CTR    | Position | Clicks Share"
+      puts "-------------------------------------------------------------------------"
+      d[:devices].each do |r|
+        d_name = format_device(r[:device]).ljust(12)
+        c_str = format_number(r[:clicks]).ljust(8)
+        i_str = format_number(r[:impressions]).ljust(11)
+        ctr_str = "#{r[:ctr]}%".ljust(6)
+        pos_str = r[:position].to_s.ljust(8)
+        share_str = r[:share].to_s
+        puts "#{d_name} | #{c_str} | #{i_str} | #{ctr_str} | #{pos_str} | #{share_str}"
+      end
+      if d[:mobileDeficit]
+        puts "  #{Color.c('⚠️ Mobile CTR Alert: Mobile CTR is significantly lower than Desktop. Audit mobile LCP speed and small-screen snippet readability.', Color::YELLOW)}"
+      end
+      puts
+
+      # 7. GA4 Retention & High-Bounce Alerts
+      if d[:ga4] && d[:ga4][:linked]
+        puts "#{Color::BOLD}📈 6. ON-SITE RETENTION & HIGH-BOUNCE ALERTS (via GA4)#{Color::RESET}"
+        puts "  • 30-Day GA4 Sessions:        #{format_number(d[:ga4][:sessions])}"
+        puts "  • Overall Bounce Rate:         #{d[:ga4][:bounce_rate]}%"
+        puts "  • Average Session Duration:    #{d[:ga4][:avg_duration]}"
+        if d[:ga4][:high_bounce_pages].empty?
+          puts Color.c("  ✅ No critical high-bounce landing pages (>80% with >= 10 sessions) detected.", Color::GREEN)
+        else
+          puts "  • Highest-Bounce Landing Pages (>= 10 sessions, >= 80% bounce):"
+          d[:ga4][:high_bounce_pages].each_with_index do |hb, idx|
+            puts "    #{idx + 1}. #{Color.c(hb[:path].ljust(30), Color::CYAN)} ➔ #{Color.c("#{hb[:sessions]} sess", Color::BOLD)} | #{Color.c("#{hb[:bounce_rate]}% bounce", Color::RED)} | #{hb[:duration]} avg"
+          end
+        end
+        puts
+      end
+
+      # 8. Prioritized Action Plan
+      puts "#{Color::BOLD}📋 7. PRIORITIZED ACTION PLAN (THE REAL VALUE ROADMAP)#{Color::RESET}"
+      high_p = d[:actionPlan].select { |a| a[:priority] == 'high' }
+      med_p  = d[:actionPlan].select { |a| a[:priority] == 'medium' }
+      low_p  = d[:actionPlan].select { |a| a[:priority] == 'low' }
+
+      idx = 1
+      if high_p.any?
+        puts "  #{Color.c('[🔴 HIGH PRIORITY - IMMEDIATE VALUE WINS]', Color::RED, Color::BOLD)}"
+        high_p.each do |item|
+          puts "    #{idx}. #{Color::BOLD}#{item[:title]}#{Color::RESET}"
+          puts "       #{item[:detail]}"
+          idx += 1
+        end
+      end
+
+      if med_p.any?
+        puts "  #{Color.c('[🟡 MEDIUM PRIORITY - HIGH-LEVERAGE GROWTH]', Color::YELLOW, Color::BOLD)}"
+        med_p.each do |item|
+          puts "    #{idx}. #{Color::BOLD}#{item[:title]}#{Color::RESET}"
+          puts "       #{item[:detail]}"
+          idx += 1
+        end
+      end
+
+      if low_p.any?
+        puts "  #{Color.c('[🟢 QUICK WIN / TECHNICAL MAINTENANCE]', Color::GREEN, Color::BOLD)}"
+        low_p.each do |item|
+          puts "    #{idx}. #{Color::BOLD}#{item[:title]}#{Color::RESET}"
+          puts "       #{item[:detail]}"
+          idx += 1
+        end
+      end
+      puts
+    end
+
+    def self.handle_ga4_api_error(res, property_id, hostname, options)
+      msg = res.dig(:data, 'error', 'message') || res[:data].to_s
+      status = res[:status]
+
+      if options[:json]
+        puts JSON.pretty_generate({ error: msg, status: status })
+        return
+      end
+
+      puts Color.c("\n❌ Google Analytics API Error (#{status}): #{msg}", Color::RED, Color::BOLD)
+
+      # Check if error is due to Google Cloud API not being enabled
+      is_disabled_api = msg =~ /has not been used in project|SERVICE_DISABLED|is disabled|enable it by visiting/i ||
+                        (res.dig(:data, 'error', 'details')&.any? { |d| d['reason'] == 'SERVICE_DISABLED' } rescue false)
+
+      if is_disabled_api
+        url = msg[/https:\/\/[^\s]+/, 0] || (res.dig(:data, 'error', 'details', 0, 'links', 0, 'url') rescue nil)
+        puts "\n#{Color.c("⚙️  ACTION REQUIRED: Google Cloud API Not Enabled", Color::YELLOW, Color::BOLD)}"
+        puts "The requested Google Analytics API is disabled in your Google Cloud Project."
+        if url
+          puts "\n👉 #{Color::BOLD}Click this link to enable it in 1 click:#{Color::RESET}"
+          puts "   #{Color.c(url, Color::CYAN, Color::BOLD)}"
+        end
+        puts "\nAfter clicking #{Color::BOLD}'ENABLE'#{Color::RESET} in Google Cloud Console, wait 1–2 minutes for Google propagation and retry."
+        puts
+        return
+      end
+
+      if status == 403
+        sa_key = Auth.find_key
+        sa_email = (JSON.parse(File.read(sa_key))['client_email'] rescue nil) if sa_key
+        puts "\n#{Color::BOLD}How to Fix 403 (Permission Denied):#{Color::RESET}"
+        puts "1. Copy your Service Account email:"
+        if sa_email
+          puts "   👉 #{Color.c(sa_email, Color::CYAN, Color::BOLD)}"
+        else
+          puts "   👉 (Check your service account JSON key)"
+        end
+        puts "2. Open Google Analytics: #{Color.c('https://analytics.google.com/', Color::CYAN)}"
+        puts "3. Click ⚙️ #{Color::BOLD}Admin#{Color::RESET} (bottom-left corner)"
+        if property_id && !property_id.to_s.strip.empty?
+          puts "4. In Property Settings, click #{Color::BOLD}Property Access Management#{Color::RESET} (for Property #{property_id})"
+        else
+          puts "4. Click #{Color::BOLD}Account Access Management#{Color::RESET} (or Property Access Management)"
+        end
+        puts "5. Click the blue #{Color::BOLD}'+'#{Color::RESET} button (top-right) ➔ #{Color::BOLD}Add users#{Color::RESET}"
+        puts "6. Paste your service account email and assign the #{Color::BOLD}Viewer#{Color::RESET} role."
+        puts
+      elsif status == 404
+        puts "\nProperty ID '#{property_id}' was not found. Please verify your numeric GA4 Property ID.\n"
       end
     end
 
@@ -1753,6 +4607,8 @@ module GSC
            • In 'APIs & Services' > 'Library', enable:
              - #{Color::BOLD}Web Search Indexing API#{Color::RESET}
              - #{Color::BOLD}Google Search Console API#{Color::RESET}
+             - #{Color::BOLD}Google Analytics Data API#{Color::RESET} (for on-site metrics & retention)
+             - #{Color::BOLD}Google Analytics Admin API#{Color::RESET} (for auto-discovering GA4 properties)
            • In 'IAM & Admin' > 'Service Accounts', create a service account.
            • Click the service account > 'Keys' > 'Add Key' > 'Create new key' > 'JSON'.
            • Download the key.
@@ -1785,10 +4641,32 @@ module GSC
           #{Color.c('update', Color::GREEN)}                       Fetch latest version from GitHub and self-update
 
         #{Color::BOLD}SEARCH ANALYTICS & MONITORING:#{Color::RESET}
+          #{Color.c('performance', Color::YELLOW)}                  Executive dashboard: Totals, Devices, Countries, Snippets, Queries, Pages, Cities
           #{Color.c('top-queries', Color::YELLOW)}                  Top search queries, impressions, CTR, and average rankings
           #{Color.c('top-pages', Color::YELLOW)}                    Top indexed pages driving clicks & impressions
-          #{Color.c('performance', Color::YELLOW)}                  Aggregated Search Console performance summary (Clicks, Imp, CTR, Pos)
+          #{Color.c('devices', Color::YELLOW)}                      Device breakdown (Desktop, Mobile, Tablet) with clicks share
+          #{Color.c('countries', Color::YELLOW)}                    Geographic search demand by country (with flags & CTR)
+          #{Color.c('cities', Color::YELLOW)}                       Top visitor cities, volume, bounce rates & retention (via GA4)
+          #{Color.c('snippets', Color::YELLOW)}                     Search appearance & rich snippets (Reviews, Products, FAQs)
           #{Color.c('audit', Color::CYAN)}                        Automated 4-step SEO & Indexing Health Check
+
+        #{Color::BOLD}ENTERPRISE GROWTH & AUDIT INTELLIGENCE:#{Color::RESET}
+          #{Color.c('opportunities', Color::YELLOW)}                Striking-distance queries (Pos 7–20) to push to Page 1 / Top 3
+          #{Color.c('underperformers', Color::YELLOW)}              Top 10 queries with low CTR (easy title & meta hook wins)
+          #{Color.c('cannibalization', Color::RED)}                Detect multiple URLs competing for the same query
+          #{Color.c('decay [--compare 28]', Color::RED)}           Period-over-period trend analysis (Decaying vs Surging)
+          #{Color.c('zombies [sitemap]', Color::RED)}              Detect zero-impression pages in sitemap wasting crawl budget
+
+        #{Color::BOLD}GOOGLE ANALYTICS 4 (GA4) & POST-CLICK BEHAVIOR:#{Color::RESET}
+          #{Color.c('connect-ga4', Color::MAGENTA)}                 Interactive GA4 linking wizard (walks through setup & tests live)
+          #{Color.c('config set-ga4 <id>', Color::MAGENTA)}         Link a GA4 Property ID to active domain (stored in config)
+          #{Color.c('config unlink-ga4', Color::MAGENTA)}           Unlink GA4 Property ID from active domain
+          #{Color.c('realtime [--watch]', Color::MAGENTA)}          Live active visitors, pages, and countries right now
+          #{Color.c('ga4 [--organic]', Color::MAGENTA)}             Landing page bounce rates, engagement rates, sessions, duration
+          #{Color.c('correlation [--organic]', Color::MAGENTA)}     Merge GSC keyword rankings with GA4 bounce rates per landing page
+          #{Color.c('ads [--days 30]', Color::MAGENTA)}             Google Ads campaign performance (Clicks, Cost, CPC, CPA, Conv)
+          #{Color.c('channels [--days 30]', Color::MAGENTA)}        Omnichannel acquisition breakdown (Organic, Paid, Direct, Referral)
+          #{Color.c('ga4-properties', Color::MAGENTA)}              Discover all GA4 Property IDs accessible by your service account
 
         #{Color::BOLD}INDEXING & SITEMAP COMMANDS:#{Color::RESET}
           #{Color.c('index <url>', Color::GREEN)}                  Notify Googlebot to crawl/index a URL (URL_UPDATED)
@@ -1804,18 +4682,62 @@ module GSC
           #{Color.c('skills [install|show]', Color::CYAN)}        Inspect, install, or export the AI Agent Skill
           #{Color.c('-j, --json', Color::CYAN)}                   Machine-readable JSON output for all commands
 
-        #{Color::BOLD}EXAMPLES:#{Color::RESET}
-          gsc connect                                  # Interactive 1-click setup
-          gsc use example.com                          # Set default domain
-          gsc top-queries                              # Uses default domain automatically
-          gsc top-queries -s imp                       # Sort queries by impressions (highest volume)
-          gsc top-queries -s pos                       # Sort queries by ranking position (page 1 SERP)
-          gsc top-queries -s ctr                       # Sort queries by click-through rate
-          gsc top-pages -s clicks                      # Sort top landing pages by clicks
-          gsc inspect https://example.com/pricing      # Live Google index check
-          gsc index https://example.com/blog/new-post  # Instant Googlebot crawl ping
-          gsc audit                                    # Full 4-step SEO audit for domain
-          gsc open                                     # Open config in Finder
+        #{Color::BOLD}EXAMPLES BY WORKFLOW:#{Color::RESET}
+
+        #{Color.c('1. Domain Setup & Switching:', Color::CYAN, Color::BOLD)}
+          gsc connect                                  # Interactive 1-click credential setup
+          gsc domains                                  # List all verified properties (choose by number)
+          gsc use                                      # Interactive numbered domain switcher
+          gsc use 2                                    # Switch active domain by number
+          gsc use example.com                          # Switch active domain by name
+          gsc where                                    # Inspect CLI path, active key, and config file
+
+        #{Color.c('2. GA4 Linking & Analytics:', Color::CYAN, Color::BOLD)}
+          gsc connect-ga4                              # Interactive GA4 linking wizard
+          gsc config set-ga4 123456789                 # Link GA4 property ID to active domain
+          gsc ga4-properties                           # Discover accessible GA4 properties
+          gsc ga4 --organic                            # View landing page bounce rates & engagement
+          gsc correlation                              # Correlate SERP rankings with on-site bounce rates
+          gsc ads                                      # Google Ads campaign performance, cost & CPC
+          gsc channels                                 # Omnichannel traffic sources (Organic, Paid, Direct)
+
+        #{Color.c('3. Live Realtime Visitor Monitoring:', Color::CYAN, Color::BOLD)}
+          gsc realtime                                 # Snapshot of active visitors, URLs & countries
+          gsc realtime --watch                         # Stream live visitors in terminal (refreshes every 5s)
+          gsc realtime -d example.com --watch 3        # Stream specific domain every 3s
+          gsc realtime --json                          # Machine-readable JSON output for live dashboards
+
+        #{Color.c('4. Search Performance & Multi-Dimensional Analytics:', Color::CYAN, Color::BOLD)}
+          gsc performance                              # Executive 360° dashboard (Devices, Countries, Snippets, Cities)
+          gsc devices                                  # Desktop vs Mobile vs Tablet search traffic breakdown
+          gsc countries --limit 20                     # Top countries driving organic search impressions & clicks
+          gsc cities --limit 20                        # Top visitor cities and behavioral retention (via GA4)
+          gsc snippets                                 # Rich snippet appearances (Review stars, Product listings, FAQs)
+          gsc top-queries                              # Top search keywords, impressions, CTR, position
+          gsc top-queries -s imp --days 7              # Sort queries by highest impression volume
+          gsc top-pages -s clicks                      # Top traffic-driving landing pages
+          gsc opportunities --min-imp 10               # Striking-distance queries (Pos 7–20) to push to Top 3
+          gsc underperformers                          # Fix low CTR titles on existing Top 10 rankings
+          gsc cannibalization                          # Detect internal URL ranking conflicts
+          gsc decay --compare 28                       # Compare last 28 days vs prior 28 days
+          gsc zombies public/sitemap.xml               # Find zero-impression crawl waste pages
+          gsc audit                                    # Comprehensive 4-step SEO & GA4 health audit
+
+        #{Color.c('5. Google Indexing & Sitemaps:', Color::CYAN, Color::BOLD)}
+          gsc inspect https://example.com/pricing      # Live Google index check (coverage, canonical, date)
+          gsc index https://example.com/new-page       # Notify Googlebot to crawl/index URL immediately
+          gsc remove https://example.com/deleted-page  # Notify Googlebot a page has been removed
+          gsc status https://example.com/page          # Check Google Indexing API submission status
+          gsc sitemaps-list                            # List submitted sitemaps in Search Console
+          gsc sitemaps-submit https://example.com/sitemap.xml # Submit new XML sitemap to Google
+          gsc index-sitemap public/sitemap.xml         # Batch submit all sitemap URLs to Google Indexing API
+          gsc inspect-sitemap public/sitemap.xml       # Bulk inspect indexation status for all sitemap URLs
+
+        #{Color.c('6. Agent & JSON Export:', Color::CYAN, Color::BOLD)}
+          gsc top-queries --json                       # Clean JSON output for AI agents & pipelines
+          gsc top-pages --csv pages.csv                # Export top pages to CSV
+          gsc skills show                              # View the AI Agent Skill prompt
+          gsc skills install                           # Install agent skill to ~/.gemini/config
       COMMANDS
     end
   end
