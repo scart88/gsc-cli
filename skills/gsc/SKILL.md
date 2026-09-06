@@ -32,8 +32,11 @@ gsc performance --days 30 --json
 ### 1. Analyzing Keyword Rankings & SEO Opportunities
 When the user asks about traffic, rankings, or keyword performance:
 ```bash
-# Get top 20 queries for the active domain
-gsc top-queries --limit 20 --json
+# Get top 20 queries for the active domain (sorted by impressions)
+gsc top-queries -s imp --limit 20 --json
+
+# Find highest-ranking queries (page 1 rankings, pos ascending)
+gsc top-queries -s pos --limit 20 --json
 
 # Get queries for a specific domain over the past 90 days
 gsc top-queries -d example.com --days 90 --limit 50 --json

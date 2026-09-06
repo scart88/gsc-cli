@@ -92,14 +92,25 @@ gsc update                  # Self-update to the latest version from GitHub
 ### Search Analytics & SERP Rankings
 Once you run `gsc use <domain>`, you don't need to pass `-d` on every call:
 ```bash
-# Top 50 search queries with impressions, clicks, CTR, and average SERP position
+# Top search queries (intelligently sorted by clicks & impressions)
 gsc top-queries
+
+# Sort queries by impressions (highest volume target keywords)
+gsc top-queries -s imp
+
+# Sort queries by average ranking position (find page-1 SERP opportunities)
+gsc top-queries -s pos
+
+# Sort queries by CTR or Clicks
+gsc top-queries -s ctr
+gsc top-queries -s clicks
 
 # Top queries over the last 90 days, limit to top 20
 gsc top-queries --days 90 --limit 20
 
-# Top indexed pages driving search traffic
-gsc top-pages --days 30
+# Top indexed pages driving search traffic (sort by impressions or clicks)
+gsc top-pages -s imp
+gsc top-pages -s clicks --days 30
 
 # 30-day aggregated performance summary (Total Clicks, Imp, CTR, Avg Pos)
 gsc performance

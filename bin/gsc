@@ -78,6 +78,9 @@
 #   -j, --json              Output machine-readable JSON (ideal for AI agents & programmatic use)
 #       --days <n>          Time window in days for search analytics (default: 30)
 #       --limit <n>         Max rows to display (default: 50)
+#   -s, --sort <field>      Sort analytics by: clicks, impressions (imp), position (pos), ctr
+#       --order <dir>       Sort direction: asc or desc
+#       --asc / --desc      Direction shortcuts (default: asc for pos, desc for clicks/imp/ctr)
 #       --csv <path>        Export analytics or inspection results to a CSV file
 #       --delay <ms>        Delay between sequential API requests in ms (default: 120ms)
 #       --dry-run           Simulate execution without sending API mutations
@@ -409,7 +412,7 @@ module GSC
 
   # CLI Command Runner
   class CLI
-    VERSION = '1.3.0'
+    VERSION = '1.4.0'
     DEFAULT_UPDATE_URL = 'https://raw.githubusercontent.com/scart88/gsc-cli/main/bin/gsc'
 
     BANNER = <<~BANNER
@@ -453,8 +456,11 @@ module GSC
       ### 1. Analyzing Keyword Rankings & SEO Opportunities
       When the user asks about traffic, rankings, or keyword performance:
       ```bash
-      # Get top 20 queries for the active domain
-      gsc top-queries --limit 20 --json
+      # Get top 20 queries for the active domain (sorted by impressions)
+      gsc top-queries -s imp --limit 20 --json
+
+      # Find highest-ranking queries (page 1 rankings, pos ascending)
+      gsc top-queries -s pos --limit 20 --json
 
       # Get queries for a specific domain over the past 90 days
       gsc top-queries -d example.com --days 90 --limit 50 --json
@@ -514,6 +520,8 @@ module GSC
         key: ENV['GSC_KEY_PATH'],
         days: 30,
         limit: 50,
+        sort: nil,
+        order: nil,
         csv: nil,
         delay: 120,
         dry_run: false,
@@ -543,6 +551,22 @@ module GSC
 
         opts.on('--limit LIMIT', Integer, 'Maximum rows to display (default: 50)') do |limit|
           options[:limit] = limit
+        end
+
+        opts.on('-s', '--sort FIELD', 'Sort analytics: clicks, impressions (imp), position (pos), ctr') do |s|
+          options[:sort] = s
+        end
+
+        opts.on('--order ORDER', 'Sort direction: asc or desc') do |o|
+          options[:order] = o
+        end
+
+        opts.on('--asc', 'Sort ascending (default for position/rank)') do
+          options[:order] = 'asc'
+        end
+
+        opts.on('--desc', 'Sort descending (default for clicks, impressions, ctr)') do
+          options[:order] = 'desc'
         end
 
         opts.on('--csv PATH', 'Export results to a CSV file') do |csv|
@@ -833,10 +857,14 @@ module GSC
         end
 
       when 'top-queries'
-        puts "📊 Fetching top search queries for #{Color.c(site_url, Color::CYAN)} (Past #{options[:days]} days)...\n" unless options[:json]
-        res = api.query_analytics(site_url, days: options[:days], dimensions: ['query'], row_limit: options[:limit])
+        sort_field, sort_order = resolve_sort_params(options[:sort], options[:order])
+        sort_desc = sort_field ? "sorted by #{sort_field} #{sort_order}" : "sorted by clicks & impressions"
+        puts "📊 Fetching top search queries for #{Color.c(site_url, Color::CYAN)} (Past #{options[:days]} days, #{sort_desc})...\n" unless options[:json]
+
+        fetch_limit = [options[:limit] * 10, 1000].max
+        res = api.query_analytics(site_url, days: options[:days], dimensions: ['query'], row_limit: fetch_limit)
         if res[:ok]
-          rows = (res.dig(:data, 'rows') || []).map do |r|
+          raw_rows = (res.dig(:data, 'rows') || []).map do |r|
             {
               query: r['keys'].first,
               clicks: r['clicks'],
@@ -845,6 +873,8 @@ module GSC
               position: r['position'].round(1)
             }
           end
+
+          rows = sort_analytics_rows(raw_rows, options[:sort], options[:order]).first(options[:limit])
 
           if options[:json]
             puts JSON.pretty_generate(rows)
@@ -877,10 +907,14 @@ module GSC
         end
 
       when 'top-pages'
-        puts "📊 Fetching top performing pages for #{Color.c(site_url, Color::CYAN)} (Past #{options[:days]} days)...\n" unless options[:json]
-        res = api.query_analytics(site_url, days: options[:days], dimensions: ['page'], row_limit: options[:limit])
+        sort_field, sort_order = resolve_sort_params(options[:sort], options[:order])
+        sort_desc = sort_field ? "sorted by #{sort_field} #{sort_order}" : "sorted by clicks & impressions"
+        puts "📊 Fetching top performing pages for #{Color.c(site_url, Color::CYAN)} (Past #{options[:days]} days, #{sort_desc})...\n" unless options[:json]
+
+        fetch_limit = [options[:limit] * 10, 1000].max
+        res = api.query_analytics(site_url, days: options[:days], dimensions: ['page'], row_limit: fetch_limit)
         if res[:ok]
-          rows = (res.dig(:data, 'rows') || []).map do |r|
+          raw_rows = (res.dig(:data, 'rows') || []).map do |r|
             {
               page: r['keys'].first,
               clicks: r['clicks'],
@@ -889,6 +923,8 @@ module GSC
               position: r['position'].round(1)
             }
           end
+
+          rows = sort_analytics_rows(raw_rows, options[:sort], options[:order]).first(options[:limit])
 
           if options[:json]
             puts JSON.pretty_generate(rows)
@@ -1078,6 +1114,65 @@ module GSC
           puts Color.c("❌ Unknown command: '#{command}'. Run 'gsc --help' for options.", Color::RED)
         end
         exit 1
+      end
+    end
+
+    def self.resolve_sort_params(field, order)
+      canonical_field = case field&.to_s&.downcase&.strip
+      when 'imp', 'impr', 'impressions'
+        :impressions
+      when 'pos', 'rank', 'position'
+        :position
+      when 'ctr'
+        :ctr
+      when 'clicks', 'click'
+        :clicks
+      when nil, ''
+        nil
+      else
+        field.to_s.downcase.strip.to_sym
+      end
+
+      canonical_order = if order && !order.to_s.strip.empty?
+        order.to_s.downcase.strip.start_with?('asc') ? :asc : :desc
+      elsif canonical_field == :position
+        :asc
+      else
+        :desc
+      end
+
+      [canonical_field, canonical_order]
+    end
+
+    def self.sort_analytics_rows(rows, sort_field, order)
+      field, dir = resolve_sort_params(sort_field, order)
+
+      if field
+        rows.sort do |a, b|
+          val_a = a[field] || 0
+          val_b = b[field] || 0
+          cmp = val_a <=> val_b
+          cmp = (cmp.nil? ? 0 : cmp)
+          dir == :asc ? cmp : -cmp
+        end
+      else
+        # Default intelligent sort:
+        # 1. Clicks DESC
+        # 2. Impressions DESC
+        # 3. Position ASC
+        rows.sort do |a, b|
+          clicks_cmp = (b[:clicks] || 0) <=> (a[:clicks] || 0)
+          if clicks_cmp.zero?
+            imp_cmp = (b[:impressions] || 0) <=> (a[:impressions] || 0)
+            if imp_cmp.zero?
+              (a[:position] || 999.0) <=> (b[:position] || 999.0)
+            else
+              imp_cmp
+            end
+          else
+            clicks_cmp
+          end
+        end
       end
     end
 
@@ -1713,6 +1808,10 @@ module GSC
           gsc connect                                  # Interactive 1-click setup
           gsc use example.com                          # Set default domain
           gsc top-queries                              # Uses default domain automatically
+          gsc top-queries -s imp                       # Sort queries by impressions (highest volume)
+          gsc top-queries -s pos                       # Sort queries by ranking position (page 1 SERP)
+          gsc top-queries -s ctr                       # Sort queries by click-through rate
+          gsc top-pages -s clicks                      # Sort top landing pages by clicks
           gsc inspect https://example.com/pricing      # Live Google index check
           gsc index https://example.com/blog/new-post  # Instant Googlebot crawl ping
           gsc audit                                    # Full 4-step SEO audit for domain
