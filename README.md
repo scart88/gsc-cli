@@ -28,12 +28,12 @@ Official Google API gems (`google-apis-searchconsole_v1`, `google-apis-indexing_
 
 ### Option 1: One-Line Installer (Recommended)
 ```bash
-curl -fsSL https://raw.githubusercontent.com/username/gsc/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/scart88/gsc-cli/main/install.sh | bash
 ```
 
 ### Option 2: Clone or Download Directly
 ```bash
-git clone https://github.com/username/gsc.git
+git clone https://github.com/scart88/gsc-cli.git
 cd gsc
 cp bin/gsc ~/.local/bin/gsc
 chmod +x ~/.local/bin/gsc
@@ -214,7 +214,7 @@ gsc/
 Contributions, bug reports, and PRs are welcome!
 
 ```bash
-git clone https://github.com/username/gsc.git
+git clone https://github.com/scart88/gsc-cli.git
 cd gsc
 chmod +x bin/gsc
 ./bin/gsc version

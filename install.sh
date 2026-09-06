@@ -27,7 +27,7 @@ if [ -f "${SCRIPT_DIR}/bin/gsc" ]; then
   echo -e "📦 Installing from local repository..."
   cp "${SCRIPT_DIR}/bin/gsc" "${TARGET_BIN}"
 else
-  REPO_RAW_URL="${GSC_SOURCE_URL:-https://raw.githubusercontent.com/username/gsc/main/bin/gsc}"
+  REPO_RAW_URL="${GSC_SOURCE_URL:-https://raw.githubusercontent.com/scart88/gsc-cli/main/bin/gsc}"
   echo -e "🌐 Downloading latest release from ${CYAN}${REPO_RAW_URL}${RESET}..."
   curl -fsSL "${REPO_RAW_URL}" -o "${TARGET_BIN}"
 fi

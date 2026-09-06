@@ -410,6 +410,7 @@ module GSC
   # CLI Command Runner
   class CLI
     VERSION = '1.3.0'
+    DEFAULT_UPDATE_URL = 'https://raw.githubusercontent.com/scart88/gsc-cli/main/bin/gsc'
 
     BANNER = <<~BANNER
       #{Color::BOLD}#{Color::CYAN}╔══════════════════════════════════════════════════════════════╗
@@ -1234,20 +1235,7 @@ module GSC
     end
 
     def self.handle_update_command(options)
-      repo_url = Config.load['update_url'] || ENV['GSC_UPDATE_URL']
-
-      if repo_url.nil? || repo_url.empty?
-        if options[:json]
-          puts JSON.pretty_generate({ error: 'No update URL configured. Set with: gsc config set-update-url <url>' })
-        else
-          puts BANNER
-          puts Color.c("ℹ️ Current version is #{VERSION}.", Color::CYAN)
-          puts "\nTo enable 1-click updates from your GitHub repository or Gist:"
-          puts "   #{Color.c('gsc config set-update-url https://raw.githubusercontent.com/<user>/<repo>/main/gsc.rb', Color::CYAN)}"
-          puts "\nThen run #{Color.c('gsc update', Color::GREEN, Color::BOLD)} to self-update anytime!"
-        end
-        return
-      end
+      repo_url = Config.load['update_url'] || ENV['GSC_UPDATE_URL'] || DEFAULT_UPDATE_URL
 
       puts "🔄 Checking for updates from: #{Color.c(repo_url, Color::CYAN)}..." unless options[:json]
 
