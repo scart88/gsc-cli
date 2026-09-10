@@ -19,8 +19,7 @@
   <sub>Explore other software built by our team:</sub><br>
   ⚡ <a href="https://superspeedapp.com"><b>Superspeed</b></a> — Lightning-fast macOS disk cleaner & RAM booster for Apple Silicon<br>
   🛒 <a href="https://supercart.app"><b>Supercart</b></a> — High-converting slide cart drawer & 1-click upsells for Shopify stores<br>
-  📦 <a href="https://packinglog.com"><b>PackingLog</b></a> — Smart QR-code box inventory & photo catalog for residential & office moves<br>
-  🌸 <a href="https://zerocramp.com"><b>ZeroCramp</b></a> — Bio-acoustic menstrual relief & non-invasive wellness protocol
+  📦 <a href="https://packinglog.com"><b>PackingLog</b></a> — Smart QR-code box inventory & photo catalog for residential & office moves
 </p>
 
 ---
@@ -35,7 +34,7 @@ Every software company, indie hacker, and e-commerce founder faces the exact sam
 4. **AI Agents Need Clean, Fast, Machine-Readable Intelligence**: Modern AI coding agents (Google Antigravity, Claude Code, Cursor, Codex) cannot click web buttons. They need raw, fast, deterministic JSON over stdout.
 
 ### The Epiphany Bridge
-At **[AppollosWave](https://apolloswave.com)**, we run multiple production software businesses—from macOS system utilities (**[Superspeed](https://superspeedapp.com)**) and Shopify e-commerce apps (**[Supercart](https://supercart.app)**) to physical moving inventory SaaS (**[PackingLog](https://packinglog.com)**) and wellness tech (**[ZeroCramp](https://zerocramp.com)**).
+At **[AppollosWave](https://apolloswave.com)**, we run multiple production software businesses—from macOS system utilities (**[Superspeed](https://superspeedapp.com)**) and Shopify e-commerce apps (**[Supercart](https://supercart.app)**) to physical moving inventory SaaS (**[PackingLog](https://packinglog.com)**).
 
 We refused to bloat our repos with 40 gems or waste 10 hours a week clicking in Search Console. We needed a **single, standalone pure-Ruby CLI** that connects directly to Google APIs using native `OpenSSL` and `Net::HTTP` in **under 50 milliseconds**.
 
@@ -68,7 +67,7 @@ curl -fsSL https://raw.githubusercontent.com/ApollosWave/gsc-cli/main/install.sh
 ```
 
 ### Option 2: Clone & Install Standalone
-`gsc-cli` follows the clean Ruby pattern made famous by **Basecamp Kamal** with zero gem runtime dependencies:
+`gsc-cli` is a standalone pure-Ruby executable with zero gem runtime dependencies:
 ```bash
 git clone https://github.com/ApollosWave/gsc-cli.git
 cd gsc-cli
@@ -438,13 +437,12 @@ We build tools for high-performance software, e-commerce, and everyday logistics
 - ⚡ **[Superspeed](https://superspeedapp.com)** — The native, lightning-fast macOS performance & storage cleaner designed for Apple Silicon. Purge multi-gigabyte Xcode caches, app leftovers, and reclaim RAM in one tap.
 - 🛒 **[Supercart](https://supercart.app)** — The modern slide cart drawer for Shopify. Boost Average Order Value (AOV) with automated in-cart upsells, free shipping progress bars, and instant 1-click checkout.
 - 📦 **[PackingLog](https://packinglog.com)** — The personal and business moving box inventory management app. Batch-photograph box items with your phone, print scannable QR stickers, and locate any item in seconds.
-- 🌸 **[ZeroCramp](https://zerocramp.com)** — Bio-acoustic menstrual relief protocol providing natural, non-invasive frequency comfort.
 
 ---
 
-## 🏗️ Architecture & Development (Kamal Pattern)
+## 🏗️ Architecture & Development
 
-`gsc-cli` is engineered following the clean Ruby architecture established by **Basecamp Kamal**:
+`gsc-cli` is engineered following a clean, modular Ruby architecture:
 
 ```text
 gsc-cli/
@@ -489,5 +487,14 @@ rake gem:build
 
 ---
 
+## 🙏 Acknowledgments & Credits
+
+- **Ben Sheldon**: Inspired by Ben Sheldon's backend Ruby Google Ads API implementation and the Rails performance community's passion for lean, zero-dependency, server-side tools.
+- **Corey Haines**: The companion SEO & marketing skills (`ai-seo`, `seo-audit`, `schema`, `programmatic-seo`, `copywriting`, `cro`) are adapted from the open-source [marketingskills](https://github.com/coreyhaines31/marketingskills) repository by [Corey Haines](https://github.com/coreyhaines31) (MIT License).
+- **Basecamp & Kamal**: Modular CLI directory layout and standalone distribution patterns inspired by Basecamp's open-source tooling.
+
+---
+
 ## 📄 License
+
 This project is open-source software licensed under the **MIT License**. See [LICENSE](LICENSE) for details.
