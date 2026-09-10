@@ -27,7 +27,7 @@ Gem::Specification.new do |spec|
   spec.license       = "MIT"
   spec.required_ruby_version = ">= 3.0.0"
 
-  spec.files         = Dir["lib/**/*", "bin/*", "dist/*", "README.md", "LICENSE"]
+  spec.files         = Dir["lib/**/*", "bin/*", "dist/*", "*.md", "LICENSE"]
   spec.bindir        = "bin"
   spec.executables   = ["gsc"]
   spec.require_paths = ["lib"]
@@ -37,5 +37,5 @@ Gem::Specification.new do |spec|
   spec.metadata["documentation_uri"] = "https://github.com/ApollosWave/gsc-cli#readme"
   spec.metadata["bug_tracker_uri"]   = "https://github.com/ApollosWave/gsc-cli/issues"
   spec.metadata["changelog_uri"]     = "https://github.com/ApollosWave/gsc-cli/blob/main/README.md"
-  spec.metadata["funding_uri"]       = "https://superspeedapp.com/?utm_source=rubygems&utm_medium=gem_sidebar&utm_campaign=gsc-cli"
+  spec.metadata["funding_uri"]       = "https://github.com/ApollosWave/gsc-cli#-sponsorship--backing"
 end

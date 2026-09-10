@@ -9,6 +9,15 @@ module GSC
     CONFIG_DIR  = File.expand_path('~/.config/gsc')
     CONFIG_FILE = File.join(CONFIG_DIR, 'config.json')
 
+def self.get(key)
+  load[key.to_s]
+end
+
+def self.set(key, value)
+  save(key.to_s => value)
+  value
+end
+
     def self.load
       return {} unless File.exist?(CONFIG_FILE)
       JSON.parse(File.read(CONFIG_FILE))

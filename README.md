@@ -7,6 +7,7 @@
 [![Gem Version](https://badge.fury.io/rb/gsc-cli.svg)](https://rubygems.org/gems/gsc-cli)
 [![Dependencies](https://img.shields.io/badge/dependencies-0%20gems-brightgreen.svg)](#)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Sponsor](https://img.shields.io/badge/Sponsor-Stripe-635BFF.svg?logo=stripe&logoColor=white)](#-sponsorship--backing)
 [![AI Agent Native](https://img.shields.io/badge/AI%20Agent-Native%20Skill-purple.svg)](#-ai-agent-native-integration-antigravity-claude-cursor)
 
 ---
@@ -91,6 +92,9 @@ gsc version
 ---
 
 ## ⚡ 2-Minute Google Setup
+
+> 🔑 **Need help with GA4, Google PageSpeed, OpenPageRank, or Keywords Everywhere?**  
+> Check out the complete **[Authentication & API Key Setup Guide (AUTH.md)](AUTH.md)** for 30-second walkthroughs and zero-key features.
 
 ### Step 1: Create a Google Cloud Service Account Key
 1. Open [Google Cloud Console](https://console.cloud.google.com/).
@@ -469,6 +473,142 @@ We build tools for high-performance software, e-commerce, and everyday logistics
 
 ---
 
+## 🧠 Modern SEO, AI Search (AEO) & Competitor Intelligence (v2.1)
+
+GSC CLI v2.1 introduces a zero-cost, zero-gem suite of tools covering **AI search readiness**, **competitor gap analysis**, **Core Web Vitals**, and **first-party Google autocompletions**:
+
+### 1. Google Autocomplete & Alphabet Soup (`gsc suggest`)
+Harvest 100+ high-intent search suggestions across the full alphabet in seconds without paying for KeywordTool.io:
+```bash
+# Standard Google search suggestions
+gsc suggest "moving boxes"
+
+# Alphabet soup harvester (a-z permutations)
+gsc suggest "storage units" --alphabet
+
+# Machine-readable JSON output for AI pipelines
+gsc suggest "commercial packaging" --alphabet --json
+```
+
+### 2. People Also Ask (PAA) Question Miner (`gsc questions`)
+Mine real user questions directly from Google search intent modules to build instant FAQ sections and blog content outlines:
+```bash
+gsc questions "packing dishes"
+```
+
+### 3. Real Core Web Vitals via PageSpeed Insights (`gsc speed`)
+Directly measure Google's official Core Web Vitals (LCP, INP, CLS, FCP, TTFB) and Lighthouse scores with 25,000 free queries/day:
+```bash
+# Audit mobile Core Web Vitals
+gsc speed https://packinglog.com/ --strategy mobile
+
+# Audit desktop performance with machine-readable diagnostics
+gsc speed https://packinglog.com/features --strategy desktop --json
+```
+
+### 4. SurferSEO-Style Topical Content Gap (`gsc content-gap`)
+Compare your page against any top-ranking competitor to uncover missing 1-gram, 2-gram, and 3-gram keyphrases and omitted headings:
+```bash
+gsc content-gap https://packinglog.com/ https://uhaul.com/
+```
+
+### 5. Head-to-Head On-Page Benchmark (`gsc compare`)
+Run an instant side-by-side comparison of titles, meta descriptions, H1 counts, image alt tags, JSON-LD schemas, and server response times:
+```bash
+gsc compare https://packinglog.com/free-moving-labels https://uhaul.com/moving-supplies/boxes/
+```
+
+### 6. AI Search & LLM Citation Readiness (`gsc llms`)
+Perplexity, ChatGPT, and Claude prioritize sites with clean markdown knowledge bases and structured layouts:
+```bash
+# Generate a production-ready /llms.txt file from your sitemap
+gsc llms https://packinglog.com/ --save
+
+# Audit a page's citation readiness score for AI answer engines
+gsc llms https://packinglog.com/ audit
+```
+
+### 7. Rich Schema Validator & Generator (`gsc schema`)
+Validate JSON-LD structured data against Google's Rich Result guidelines or generate copy-paste snippets:
+```bash
+# Validate existing structured data on a live page
+gsc schema https://packinglog.com/
+
+# Generate valid FAQPage JSON-LD snippet
+gsc schema generate faq
+
+# Generate valid SoftwareApplication JSON-LD snippet
+gsc schema generate software
+```
+
+### 8. Google SERP & Social Card Simulator (`gsc preview`)
+Render an exact ASCII preview of your Google desktop search snippet and OpenGraph/Twitter social cards before publishing:
+```bash
+gsc preview https://packinglog.com/
+```
+
+### 9. Redirect Chain & Header Tracer (`gsc trace`)
+Trace multi-hop 301/302 redirect loops, HSTS security headers, canonical links, and `X-Robots-Tag` directives:
+```bash
+gsc trace packinglog.com
+```
+
+### 10. Robots.txt Crawler Simulator (`gsc robots`)
+Simulate crawl permissions for Googlebot, GPTBot, PerplexityBot, or ClaudeBot:
+```bash
+gsc robots https://packinglog.com/ /admin --bot gptbot
+```
+
+### 11. Domain Authority via OpenPageRank (`gsc authority`)
+Query PageRank (0–10) and Global Web Rank computed across Common Crawl's open graph with 300,000 free calls/month:
+```bash
+gsc authority packinglog.com uhaul.com
+```
+
+### 12. GSC External Backlink Ingestion (`gsc backlinks`)
+Ingest your official Google Search Console External Links export without third-party crawler fees:
+```bash
+# Ingest links from clipboard or CSV file
+gsc backlinks import clip
+gsc backlinks import Links_External_Pages.csv
+
+# View top referring domains and most linked landing pages
+gsc backlinks packinglog.com
+```
+
+---
+
+## 🥊 How GSC CLI Compares (The Zero-Bloat Advantage)
+
+### Full First-Party SEO Intelligence Without the $300/Mo Scraping Tax
+Get complete ground-truth Search Console analytics, instant Googlebot indexing, and real-time trends in under 50ms — even if you refuse to pay third-party API fees, run heavy Docker containers, or manage bloated database dependencies.
+
+Every other open-source SEO tool on GitHub falls into one of three painful traps:
+
+1. **The DataForSEO Tax Trap**: Many open-source tools look impressive until you discover they are thin frontends around **DataForSEO**. Every single keyword search, competitor look-up, and rank check costs you per-query API credits. When your credit balance runs dry, the tool stops working completely.
+2. **The 500MB Docker Bloat Trap**: Other suites require launching `docker-compose`, PostgreSQL databases, Redis queues, and heavy Node.js web servers just to audit 50 URLs. They are impossible to embed into lightweight terminal workflows or autonomous AI agent loops.
+3. **The Fragile Single-Feature Script**: Python-based tools often drag in heavy `pandas` and `pytrends` dependencies that break whenever Google updates internal endpoint tokens, without offering Google Search Console, Google Indexing, or actionable ranking correlation.
+
+**`gsc-cli` was engineered on a radically different architectural philosophy**: Zero gems. Zero external databases. Zero middleman scraping fees. Pure Ruby standard library communicating directly with Google's bare-metal HTTP APIs in under 50 milliseconds.
+
+### 📊 Feature Comparison Matrix
+
+| Capability | every-app/open-seo (18k ⭐) | crawlseo/crawlseo | akvise/trends-checker | ApollosWave/gsc-cli (v2.1.0) |
+| :--- | :--- | :--- | :--- | :--- |
+| **Price** | $10/mo + DataForSEO fees | Free (Requires VPS) | Free / DataForSEO | **100% Free & Open Source ($0)** |
+| **Dependencies** | 100+ npm packages + DB | Docker + Postgres + Node | Python 3.11 + pandas | **0 Gems / Pure Standard Library** |
+| **Binary Size / Footprint** | ~300 MB+ | ~500 MB+ (Docker images) | ~150 MB (Python venv) | **368 KB (Single executable file)** |
+| **Execution Latency** | 3–5 seconds (Web app) | Web UI | 2–4 seconds | **< 50 milliseconds** |
+| **Google Search Console** | Indirect / DataForSEO | ✅ Direct API | ❌ None | **✅ Direct API with Gzip compression** |
+| **Google Indexing API** | ❌ None | ❌ None | ❌ None | **✅ Direct 1-click Googlebot ping** |
+| **Google Analytics 4** | ❌ None | ❌ None | ❌ None | **✅ Realtime, Ads, & Traffic channels** |
+| **Google Trends** | ❌ None | ❌ None | ✅ Standalone only | **✅ Built-in velocity & sparklines** |
+| **Site Crawler & Audits** | Paid DataForSEO crawler | ✅ Max 2k pages | ❌ None | **✅ Sitemap + SERP pixel width checks** |
+| **Keyword Ingestion** | DataForSEO API only | ❌ Manual | ❌ None | **✅ `gsc import clip` (Free Clipboard)** |
+| **AI Agent Native Skill** | MCP server only | MCP server only | ❌ None | **✅ Claude Code / Antigravity Skill + JSON** |
+
+---
+
 ## 🏗️ Architecture & Development
 
 `gsc-cli` is engineered following a clean, modular Ruby architecture:
@@ -513,6 +653,34 @@ rake install:standalone
 # Build gem package
 rake gem:build
 ```
+
+---
+
+## 💖 Sponsorship & Backing
+
+`gsc-cli` is free, open-source software built to eliminate predatory monthly subscriptions for indie developers, founders, and AI builders.
+
+If GSC CLI saves your team hours of manual audit work or hundreds in monthly SaaS fees, consider backing continuous development:
+
+| Tier | Monthly | Perks | Sponsorship Link |
+| :--- | :--- | :--- | :--- |
+| **Community Supporter** | **$10 / mo** | Name in README Backers list + Discord/GitHub badge | [**Sponsor $10/mo**](https://buy.stripe.com/fZu6oG4Qz1EucVT4ygbAs00) |
+| **Backer** | **$50 / mo** | Name + link in Backers section + priority issue triage | [**Sponsor $50/mo**](https://buy.stripe.com/7sY00ier91Eu5tr0i0bAs01) |
+| **Agency Partner** | **$100 / mo** | Small logo/link in Agency Backers gallery + priority triage | [**Sponsor $100/mo**](https://buy.stripe.com/6oU9AS1Engzog853ucbAs02) |
+| **Bronze Sponsor** | **$500 / mo** | Medium logo with dofollow backlink in README & docs | [**Sponsor $500/mo**](https://buy.stripe.com/eVqdR882LgzobRP9SAbAs03) |
+| **Silver Sponsor** | **$1,500 / mo** | Large logo on top fold + monthly feature priority request | [**Sponsor $1,500/mo**](https://buy.stripe.com/8x2aEWbeX2IybRP1m4bAs04) |
+| **Gold Title Sponsor** | **$2,500 / mo** | Title banner at top of README + 1h monthly consulting | [**Sponsor $2,500/mo**](https://buy.stripe.com/cNi7sK4Qz6YOaNL3ucbAs05) |
+
+> *All sponsorships are processed securely via **Stripe** by ApollosWave LLC. Invoices with company VAT / Business Tax ID provided automatically upon checkout.*
+
+👉 **[Read the Full Sponsorship Prospectus & Tier Breakdown →](FUNDING.md)**
+
+
+### ApollosWave Ecosystem
+GSC CLI is maintained by [ApollosWave LLC](https://apolloswave.com/?utm_source=github&utm_medium=readme&utm_campaign=gsc-cli). Check out our products:
+- **[Superspeed](https://superspeedapp.com/?utm_source=github&utm_medium=readme&utm_campaign=gsc-cli)**: Autonomous Core Web Vitals & website speed optimization engine.
+- **[Supercart](https://supercartapp.com/?utm_source=github&utm_medium=readme&utm_campaign=gsc-cli)**: High-converting slide cart drawer for Shopify merchants.
+- **[PackingLog](https://packinglog.com/?utm_source=github&utm_medium=readme&utm_campaign=gsc-cli)**: Smart QR-code moving box inventory organizer.
 
 ---
 

@@ -22,3 +22,7 @@ scratch/
 # Gem packages
 *.gem
 pkg/
+
+# Private Maintainer SOPs (Never commit)
+.agents/SPONSOR_FULFILLMENT.md
+.agents/private/

@@ -161,6 +161,22 @@ opts.on('--save', 'Save keyword research snapshot to ~/.config/gsc/domains/<doma
   options[:save] = true
 end
 
+opts.on('--alphabet', 'Run alphabet soup harvest (a-z) for search suggestions') do
+  options[:alphabet] = true
+end
+
+opts.on('--numbers', 'Include numbers (0-9) in alphabet soup search suggestions') do
+  options[:numbers] = true
+end
+
+opts.on('--strategy STRAT', 'PageSpeed device strategy: mobile or desktop (default: mobile)') do |s|
+  options[:strategy] = s
+end
+
+opts.on('--bot NAME', 'User agent bot name for robots.txt testing (default: googlebot)') do |b|
+  options[:bot] = b
+end
+
 
 opts.on('--delay MS', Integer, 'Delay between sequential requests in ms (default: 120)') do |delay|
   options[:delay] = delay
@@ -229,6 +245,72 @@ opts.on('--dry-run', 'Simulate API calls without mutating data') do
         handle_use_command(nil, options)
         exit 0 unless options[:in_dashboard]
         return
+
+when 'suggest', 'autocomplete', 'sug'
+  handle_suggest_command(target, options)
+  exit 0 unless options[:in_dashboard]
+  return if options[:in_dashboard]
+
+when 'questions', 'paa', 'faqs'
+  handle_questions_command(target, options)
+  exit 0 unless options[:in_dashboard]
+  return if options[:in_dashboard]
+
+when 'authority', 'opr', 'da', 'domain-authority'
+  handle_authority_command(target, extra, options)
+  exit 0 unless options[:in_dashboard]
+  return if options[:in_dashboard]
+
+when 'speed', 'vitals', 'pagespeed', 'psi'
+  handle_speed_command(target, options)
+  exit 0 unless options[:in_dashboard]
+  return if options[:in_dashboard]
+
+when 'compare', 'diff-seo', 'vs'
+  handle_compare_command(target, extra, options)
+  exit 0 unless options[:in_dashboard]
+  return if options[:in_dashboard]
+
+when 'content-gap', 'gap'
+  handle_content_gap_command(target, extra, options)
+  exit 0 unless options[:in_dashboard]
+  return if options[:in_dashboard]
+
+when 'internal-links', 'orphans', 'links-audit'
+  handle_internal_links_command(target, options)
+  exit 0 unless options[:in_dashboard]
+  return if options[:in_dashboard]
+
+when 'schema', 'rich-snippets', 'ld-json'
+  handle_schema_command(target, extra, options)
+  exit 0 unless options[:in_dashboard]
+  return if options[:in_dashboard]
+
+when 'llms', 'ai-ready'
+  handle_llms_command(target, extra, options)
+  exit 0 unless options[:in_dashboard]
+  return if options[:in_dashboard]
+
+when 'preview', 'serp-preview', 'social-preview'
+  handle_preview_command(target, options)
+  exit 0 unless options[:in_dashboard]
+  return if options[:in_dashboard]
+
+when 'trace', 'redirects', 'hops'
+  handle_trace_command(target, options)
+  exit 0 unless options[:in_dashboard]
+  return if options[:in_dashboard]
+
+when 'robots', 'robots-txt'
+  handle_robots_command(target, extra, options)
+  exit 0 unless options[:in_dashboard]
+  return if options[:in_dashboard]
+
+when 'backlinks', 'links'
+  handle_backlinks_command(target, extra, options)
+  exit 0 unless options[:in_dashboard]
+  return if options[:in_dashboard]
+
 
       when 'trends', 'tr', 'google-trends', 'gtrends', 't'
   if target.nil? || target.strip.empty?
