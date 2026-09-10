@@ -28,20 +28,12 @@ if [ -f "${SCRIPT_DIR}/dist/gsc" ]; then
   cp "${SCRIPT_DIR}/dist/gsc" "${TARGET_BIN}"
 elif [ -d "${SCRIPT_DIR}/lib/gsc" ]; then
   echo -e "📦 Building and installing standalone binary from local repository..."
-  (cd "${SCRIPT_DIR}" && rake build:standalone >/dev/null 2>&1 || ruby -r fileutils -e '
-    require_relative "lib/gsc/version"
-    FileUtils.mkdir_p("dist")
-    out = ["#!/usr/bin/env ruby", "# frozen_string_literal: true", "require "net/http"", "require "uri"", "require "json"", "require "openssl"", "require "base64"", "require "optparse"", "require "time"", "require "date"", "require "fileutils""]
-    ["version.rb", "color.rb", "config.rb", "auth.rb", "client.rb", "api.rb", "sitemap_loader.rb", "google_trends.rb", "keyword_planner.rb", "keywords_everywhere.rb", "command_registry.rb", "cli.rb"].each { |f| out << File.read("lib/gsc/#{f}").gsub(/^# frozen_string_literal: true\s*/, "").strip }
-    out << "GSC::CLI.start(ARGV) if __FILE__ == $PROGRAM_NAME"
-    File.write("dist/gsc", out.join("\n"))
-    File.chmod(0755, "dist/gsc")
-  ')
+  (cd "${SCRIPT_DIR}" && rake build:standalone >/dev/null 2>&1 || ruby -e 'system("rake", "build:standalone")')
   cp "${SCRIPT_DIR}/dist/gsc" "${TARGET_BIN}"
 else
   REPO_RAW_URL="${GSC_SOURCE_URL:-https://raw.githubusercontent.com/ApollosWave/gsc-cli/main/dist/gsc}"
   echo -e "🌐 Downloading latest release from ${CYAN}${REPO_RAW_URL}${RESET}..."
-  curl -fsSL "${REPO_RAW_URL}" -o "${TARGET_BIN}" || curl -fsSL "https://raw.githubusercontent.com/scart88/gsc-cli/main/dist/gsc" -o "${TARGET_BIN}"
+  curl -fsSL "${REPO_RAW_URL}" -o "${TARGET_BIN}"
 fi
 
 chmod +x "${TARGET_BIN}"

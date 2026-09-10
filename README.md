@@ -489,9 +489,9 @@ rake gem:build
 
 ## 🙏 Acknowledgments & Credits
 
-- **Ben Sheldon**: Inspired by Ben Sheldon's backend Ruby Google Ads API implementation and the Rails performance community's passion for lean, zero-dependency, server-side tools.
-- **Corey Haines**: The companion SEO & marketing skills (`ai-seo`, `seo-audit`, `schema`, `programmatic-seo`, `copywriting`, `cro`) are adapted from the open-source [marketingskills](https://github.com/coreyhaines31/marketingskills) repository by [Corey Haines](https://github.com/coreyhaines31) (MIT License).
-- **Basecamp & Kamal**: Modular CLI directory layout and standalone distribution patterns inspired by Basecamp's open-source tooling.
+- **[Ben Sheldon](https://github.com/bensheldon)**: Inspired by Ben Sheldon's backend Ruby Google Ads API implementation and the Rails performance community's passion for lean, zero-dependency, server-side tools.
+- **[Corey Haines](https://github.com/coreyhaines31)**: The companion SEO & marketing skills (`ai-seo`, `seo-audit`, `schema`, `programmatic-seo`, `copywriting`, `cro`) are adapted from the open-source [marketingskills](https://github.com/coreyhaines31/marketingskills) repository by [Corey Haines](https://github.com/coreyhaines31) (MIT License).
+- **[Basecamp & Kamal](https://github.com/basecamp/kamal)**: Modular CLI directory layout and standalone distribution patterns inspired by Basecamp's open-source tooling.
 
 ---
 
