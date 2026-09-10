@@ -13,14 +13,14 @@
 
 <p align="center">
   <b>gsc-cli</b> is a free, open-source initiative built and maintained by 
-  <a href="https://apolloswave.com"><b>ApollosWave LLC</b></a>.
+  <a href="https://apolloswave.com/?utm_source=github&utm_medium=readme&utm_campaign=gsc-cli"><b>ApollosWave LLC</b></a>.
 </p>
 
 <p align="center">
   <sub>Explore other software built by our team:</sub><br>
-  ⚡ <a href="https://superspeedapp.com"><b>Superspeed</b></a> — Lightning-fast macOS disk cleaner & RAM booster for Apple Silicon<br>
-  🛒 <a href="https://supercart.app"><b>Supercart</b></a> — High-converting slide cart drawer & 1-click upsells for Shopify stores<br>
-  📦 <a href="https://packinglog.com"><b>PackingLog</b></a> — Smart QR-code box inventory & photo catalog for residential & office moves
+  ⚡ <a href="https://superspeedapp.com/?utm_source=github&utm_medium=readme&utm_campaign=gsc-cli"><b>Superspeed</b></a> — Lightning-fast macOS disk cleaner & RAM booster for Apple Silicon<br>
+  🛒 <a href="https://supercartapp.com/?utm_source=github&utm_medium=readme&utm_campaign=gsc-cli"><b>Supercart</b></a> — High-converting slide cart drawer & 1-click upsells for Shopify stores<br>
+  📦 <a href="https://packinglog.com/?utm_source=github&utm_medium=readme&utm_campaign=gsc-cli"><b>PackingLog</b></a> — Smart QR-code box inventory & photo catalog for residential & office moves
 </p>
 
 ---
@@ -35,7 +35,7 @@ Every software company, indie hacker, and e-commerce founder faces the exact sam
 4. **AI Agents Need Clean, Fast, Machine-Readable Intelligence**: Modern AI coding agents (Google Antigravity, Claude Code, Cursor, Codex) cannot click web buttons. They need raw, fast, deterministic JSON over stdout.
 
 ### The Epiphany Bridge
-At **[ApollosWave](https://apolloswave.com)**, we run multiple production software businesses—from macOS system utilities (**[Superspeed](https://superspeedapp.com)**) and Shopify e-commerce apps (**[Supercart](https://supercart.app)**) to physical moving inventory SaaS (**[PackingLog](https://packinglog.com)**).
+At **[ApollosWave](https://apolloswave.com/?utm_source=github&utm_medium=readme&utm_campaign=gsc-cli)**, we run multiple production software businesses—from macOS system utilities (**[Superspeed](https://superspeedapp.com/?utm_source=github&utm_medium=readme&utm_campaign=gsc-cli)**) and Shopify e-commerce apps (**[Supercart](https://supercartapp.com/?utm_source=github&utm_medium=readme&utm_campaign=gsc-cli)**) to physical moving inventory SaaS (**[PackingLog](https://packinglog.com/?utm_source=github&utm_medium=readme&utm_campaign=gsc-cli)**).
 
 We refused to bloat our repos with 40 gems or waste 10 hours a week clicking in Search Console. We needed a **single, standalone pure-Ruby CLI** that connects directly to Google APIs using native `OpenSSL` and `Net::HTTP` in **under 50 milliseconds**.
 
@@ -47,7 +47,7 @@ We built **`gsc-cli`** to run our own marketing. **We open-sourced it 100% free 
 
 - 📈 **Real-Time Google Trends Engine**: 5-year and 1-year search trajectory, growth velocity percentage, Unicode sparklines (` ▂▃▄▅▆▇█`), and regional demand breakdowns with zero authentication.
 - 🎯 **Zero-Auth Keyword Planner**: Instant seed expansion via Google Autocomplete with automated search intent classification (`Informational`, `Commercial`, `Transactional`).
-- 💰 **Keywords Everywhere API Integration**: Fetch exact monthly search volume, CPC, competition index, and 12-month trends for up to 500 keywords in a single call.
+- 💰 **Keywords Everywhere Dual Ingestion (Zero-Cost Clipboard & Headless API)**: Ingest free keyword tables directly from the Keywords Everywhere web dashboard via `gsc import clip` (zero credits required), or connect paid API keys for 1-step automated terminal lookups (`gsc ke`).
 - 📊 **Google Ads Planner Ingestion**: Ingest CSV exports from Google Ads Keyword Planner, calculate composite Opportunity Scores (0–100), and cross-correlate with live GSC rankings.
 - 🚀 **Instant Googlebot Re-Indexing**: Ping Google's Indexing API with `URL_UPDATED` or `URL_DELETED` for priority crawl queueing within seconds.
 - 🔍 **Live Google URL Inspection**: Direct Search Console API check for indexing verdict, assigned canonical URL, crawl timestamps, and robots.txt state.
@@ -147,17 +147,60 @@ gsc site-audit https://packinglog.com/sitemap.xml --report docs/seo/site_audit_i
 
 ---
 
-### 1. Keywords Everywhere API Integration (`gsc ke`)
+### 1. Keywords Everywhere Dual Workflow (`gsc import clip` & `gsc ke`)
 
 #### The Problem
-Knowing *what* people search is only half the battle. You need to know **exact monthly search volume**, **Cost Per Click (CPC)**, and **commercial competition**. Manually logging into keyword tools, copying keyword tables, and checking spreadsheets breaks your flow and blocks autonomous AI agents.
+Knowing *what* people search is only half the battle. You need to know **exact monthly search volume**, **Cost Per Click (CPC)**, and **commercial competition**. But keyword tools either force you to buy expensive API subscriptions or lock valuable data inside disconnected browser spreadsheets.
 
-#### The Magic
-`gsc-cli` integrates directly with the official Keywords Everywhere API. In a single command, it expands any topic, pulls exact search volumes and CPCs, calculates an **Opportunity Score (0–100)**, and checks whether your domain already ranks for that keyword in Search Console:
+`gsc-cli` provides **two flexible workflows** tailored to how you work:
 
-```bash
-gsc ke "mac cleaner" --limit 25
-```
+---
+
+#### 🆓 Method A: Zero-Cost Clipboard Ingestion (`gsc import clip`)
+> **No API key or paid credits required!** Works 100% free with the Keywords Everywhere web dashboard or browser extension.
+
+If you don't have paid API credits, or prefer using the free daily lookups on the Keywords Everywhere website:
+
+1. **Copy Your Keywords in the Browser**:
+   * Open [Keywords Everywhere](https://keywordseverywhere.com/) (or use their Chrome/Firefox extension or bulk keyword tool).
+   * View any table of search volumes, CPCs, and competition metrics.
+   * Click **"Copy"** / **"Copy to Clipboard"** (or select the rows and press `Cmd+C` / `Ctrl+C`).
+2. **Run One Command in Your Terminal**:
+   ```bash
+   gsc import clip
+   ```
+3. **Instant Analysis & GSC Correlation**:
+   `gsc-cli` uses native OS clipboard tools (`pbpaste` on macOS, `xclip`/`wl-paste` on Linux) to:
+   * Parse volume, CPC, competition score, and monthly history at zero cost.
+   * Draw live **Unicode Sparklines (` ▂▃▄▅▆▇█`)** showing 12-month demand trajectory.
+   * Calculate **Opportunity Scores (0–100)** to prioritize low-competition/high-volume wins.
+   * Automatically cross-reference your live Google Search Console rankings (`🏆 Top 3`, `🥇 Page 1`, `🎯 Striking Distance`, or `🚀 Untargeted`).
+   * Automatically archive the snapshot into `~/.config/gsc/domains/<domain>/keywords/` so you can track rank progress over time!
+
+---
+
+#### ⚡ Method B: Headless Direct API Integration (`gsc ke`)
+> **For automated, headless terminal lookups.** Requires a Keywords Everywhere API key with paid credits.
+
+If you have purchased an API key from [Keywords Everywhere](https://keywordseverywhere.com/) (credits start at just $1.25 for 100,000 keyword lookups), you can query search demand directly from the terminal without ever opening a browser:
+
+1. **Connect your API key once**:
+   ```bash
+   gsc connect ke YOUR_API_KEY
+   ```
+   *Your key is securely stored in `~/.config/gsc/config.json` alongside your Google service account.*
+2. **Check your remaining account credits**:
+   ```bash
+   gsc ke-credits
+   ```
+3. **Query any keyword topic or seed directly**:
+   ```bash
+   gsc ke "mac cleaner" --limit 25
+   ```
+4. **Bulk inspect an entire keyword list headlessly**:
+   ```bash
+   gsc ke keywords.txt --country us --limit 100 --json
+   ```
 
 Terminal Output:
 ```text
@@ -172,22 +215,6 @@ Terminal Output:
   clean my mac alternative              6,600    $6.50    0.35      81/100  Commercial     🥇 Page 1 (Pos 4.2)
   how to clear system storage mac       9,900    $1.20    0.15      89/100  Informational  🚀 Untargeted
 ```
-
-#### How to Connect Keywords Everywhere in 10 Seconds
-1. Get an API key from [Keywords Everywhere](https://keywordseverywhere.com/) (credits start at just $1.25 for 100,000 keywords).
-2. Connect it in `gsc`:
-   ```bash
-   gsc connect ke YOUR_API_KEY
-   ```
-   *Your key is securely saved to `~/.config/gsc/config.json` alongside your Google credentials.*
-3. Check remaining account credits anytime:
-   ```bash
-   gsc ke-credits
-   ```
-4. Bulk inspect an entire keyword file:
-   ```bash
-   gsc ke keywords.txt --country us --limit 100 --json
-   ```
 
 ---
 
@@ -231,18 +258,22 @@ gsc planner "moving boxes" --limit 20
 
 ---
 
-### 4. Universal Keyword Ingestion: Google Ads & Keywords Everywhere (`gsc import`)
+### 4. Universal Keyword Ingestion: Clipboard, Google Ads & Files (`gsc import`)
 
 #### The Problem
 Exporting search volume and CPC data from keyword tools usually results in messy spreadsheets that sit forgotten in your downloads folder. Merging those keywords with your live Google Search Console rankings requires complex VLOOKUPs and manual position checking.
 
 #### The Magic
-`gsc import` accepts raw exports from **both Google Ads Keyword Planner and Keywords Everywhere** (in `.csv`, `.tsv`, or markdown table format):
+`gsc import` accepts raw keyword data directly from your **clipboard** or files exported from **both Google Ads Keyword Planner and Keywords Everywhere** (in `.csv`, `.tsv`, or markdown table format):
+
 ```bash
-# Import Keywords Everywhere export
+# 1-click ingest directly from your system clipboard (free & zero setup):
+gsc import clip
+
+# Import a Keywords Everywhere markdown or CSV export:
 gsc import path/to/KW.md --limit 30
 
-# Import Google Ads Keyword Planner CSV/TSV
+# Import a Google Ads Keyword Planner CSV/TSV:
 gsc import path/to/google-ads-keywords.csv --limit 30
 ```
 
@@ -344,7 +375,7 @@ gsc saved check 1
 |---|---|
 | `gsc trends <query>` | Real-time Google Trends 5y/1y demand velocity, sparklines, and geo breakdown |
 | `gsc planner <seed>` | Zero-auth Google Suggest intent expander with live GSC rank correlation |
-| `gsc import <file>` | Ingest Google Ads or Keywords Everywhere export (.csv, .tsv, .md) with 12m sparklines |
+| `gsc import <file or clip>` | Ingest Google Ads / Keywords Everywhere data from clipboard (`gsc import clip`) or file (.csv, .tsv, .md) with 12m sparklines |
 | `gsc planner-import <file>` | Ingest Google Ads / Keywords Everywhere export (alias for `import`) |
 | `gsc ke <seed or file>` | Keywords Everywhere: Exact monthly volume, CPC, competition & GSC correlation |
 | `gsc ke-credits` | Check remaining Keywords Everywhere account API credits |
@@ -428,13 +459,13 @@ gsc skills install
 
 ## 🏢 Proudly Backed by ApollosWave LLC
 
-`gsc-cli` is free and open-source software under the [MIT License](LICENSE). It is actively developed and maintained by the engineering team at **[ApollosWave LLC](https://apolloswave.com)**.
+`gsc-cli` is free and open-source software under the [MIT License](LICENSE). It is actively developed and maintained by the engineering team at **[ApollosWave LLC](https://apolloswave.com/?utm_source=github&utm_medium=readme&utm_campaign=gsc-cli)**.
 
 We build tools for high-performance software, e-commerce, and everyday logistics. Check out our commercial products:
 
-- ⚡ **[Superspeed](https://superspeedapp.com)** — The native, lightning-fast macOS performance & storage cleaner designed for Apple Silicon. Purge multi-gigabyte Xcode caches, app leftovers, and reclaim RAM in one tap.
-- 🛒 **[Supercart](https://supercart.app)** — The modern slide cart drawer for Shopify. Boost Average Order Value (AOV) with automated in-cart upsells, free shipping progress bars, and instant 1-click checkout.
-- 📦 **[PackingLog](https://packinglog.com)** — The personal and business moving box inventory management app. Batch-photograph box items with your phone, print scannable QR stickers, and locate any item in seconds.
+- ⚡ **[Superspeed](https://superspeedapp.com/?utm_source=github&utm_medium=readme&utm_campaign=gsc-cli)** — The native, lightning-fast macOS performance & storage cleaner designed for Apple Silicon. Purge multi-gigabyte Xcode caches, app leftovers, and reclaim RAM in one tap.
+- 🛒 **[Supercart](https://supercartapp.com/?utm_source=github&utm_medium=readme&utm_campaign=gsc-cli)** — The modern slide cart drawer for Shopify. Boost Average Order Value (AOV) with automated in-cart upsells, free shipping progress bars, and instant 1-click checkout.
+- 📦 **[PackingLog](https://packinglog.com/?utm_source=github&utm_medium=readme&utm_campaign=gsc-cli)** — The personal and business moving box inventory management app. Batch-photograph box items with your phone, print scannable QR stickers, and locate any item in seconds.
 
 ---
 
