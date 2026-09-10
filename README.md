@@ -4,6 +4,7 @@
 > Sub-50ms CLI & AI Agent engine for real-time Google search rankings, instant Googlebot indexing, Google Trends velocity, Keywords Everywhere volume, and 360° SEO health audits.
 
 [![Ruby](https://img.shields.io/badge/Ruby-3.0%2B-red.svg?logo=ruby&logoColor=white)](https://www.ruby-lang.org)
+[![Gem Version](https://badge.fury.io/rb/gsc-cli.svg)](https://rubygems.org/gems/gsc-cli)
 [![Dependencies](https://img.shields.io/badge/dependencies-0%20gems-brightgreen.svg)](#)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![AI Agent Native](https://img.shields.io/badge/AI%20Agent-Native%20Skill-purple.svg)](#-ai-agent-native-integration-antigravity-claude-cursor)
@@ -12,7 +13,7 @@
 
 <p align="center">
   <b>gsc-cli</b> is a free, open-source initiative built and maintained by 
-  <a href="https://apolloswave.com"><b>AppollosWave LLC</b></a>.
+  <a href="https://apolloswave.com"><b>ApollosWave LLC</b></a>.
 </p>
 
 <p align="center">
@@ -34,7 +35,7 @@ Every software company, indie hacker, and e-commerce founder faces the exact sam
 4. **AI Agents Need Clean, Fast, Machine-Readable Intelligence**: Modern AI coding agents (Google Antigravity, Claude Code, Cursor, Codex) cannot click web buttons. They need raw, fast, deterministic JSON over stdout.
 
 ### The Epiphany Bridge
-At **[AppollosWave](https://apolloswave.com)**, we run multiple production software businesses—from macOS system utilities (**[Superspeed](https://superspeedapp.com)**) and Shopify e-commerce apps (**[Supercart](https://supercart.app)**) to physical moving inventory SaaS (**[PackingLog](https://packinglog.com)**).
+At **[ApollosWave](https://apolloswave.com)**, we run multiple production software businesses—from macOS system utilities (**[Superspeed](https://superspeedapp.com)**) and Shopify e-commerce apps (**[Supercart](https://supercart.app)**) to physical moving inventory SaaS (**[PackingLog](https://packinglog.com)**).
 
 We refused to bloat our repos with 40 gems or waste 10 hours a week clicking in Search Console. We needed a **single, standalone pure-Ruby CLI** that connects directly to Google APIs using native `OpenSSL` and `Net::HTTP` in **under 50 milliseconds**.
 
@@ -61,22 +62,19 @@ We built **`gsc-cli`** to run our own marketing. **We open-sourced it 100% free 
 
 ## 📦 Quick Installation
 
-### Option 1: One-Line Installer (Recommended for macOS & Linux)
+### Option 1: Official RubyGem (Instant Global Install)
+```bash
+gem install gsc-cli
+```
+
+### Option 2: 1-Line Standalone Installer (macOS & Linux)
 ```bash
 curl -fsSL https://raw.githubusercontent.com/ApollosWave/gsc-cli/main/install.sh | bash
 ```
 
-### Option 2: Clone & Install Standalone
-`gsc-cli` is a standalone pure-Ruby executable with zero gem runtime dependencies:
-```bash
-git clone https://github.com/ApollosWave/gsc-cli.git
-cd gsc-cli
-./install.sh
-```
-
-### Option 3: RubyGem Installation
-```bash
-gem install gsc-cli
+### Option 3: In Your Gemfile (Bundler)
+```ruby
+gem 'gsc-cli'
 ```
 
 Ensure `~/.local/bin` is in your shell `PATH`:
@@ -428,9 +426,9 @@ gsc skills install
 
 ---
 
-## 🏢 Proudly Backed by AppollosWave LLC
+## 🏢 Proudly Backed by ApollosWave LLC
 
-`gsc-cli` is free and open-source software under the [MIT License](LICENSE). It is actively developed and maintained by the engineering team at **[AppollosWave LLC](https://apolloswave.com)**.
+`gsc-cli` is free and open-source software under the [MIT License](LICENSE). It is actively developed and maintained by the engineering team at **[ApollosWave LLC](https://apolloswave.com)**.
 
 We build tools for high-performance software, e-commerce, and everyday logistics. Check out our commercial products:
 

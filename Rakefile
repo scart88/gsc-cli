@@ -99,7 +99,7 @@ task :"build:standalone" do
   out << "PageAnalyzer       = GSC::PageAnalyzer unless defined?(PageAnalyzer)"
   out << "SiteCrawler        = GSC::SiteCrawler unless defined?(SiteCrawler)"
   out << ""
-  out << "GSC::CLI.start(ARGV) if __FILE__ == $PROGRAM_NAME"
+  out << "GSC::CLI.start(ARGV)"
   out << ""
 
   File.write(dist_bin, out.join("\n"), encoding: "UTF-8")
