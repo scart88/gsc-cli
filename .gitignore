@@ -18,3 +18,7 @@ Thumbs.db
 *.log
 tmp/
 scratch/
+
+# Gem packages
+*.gem
+pkg/
