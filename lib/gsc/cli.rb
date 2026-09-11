@@ -382,7 +382,7 @@ when 'version', '-v', '--version'
         exit 0 unless options[:in_dashboard]
         return if options[:in_dashboard]
       when 'config'
-        handle_config_command(target, extra, options)
+        handle_config_command(target, extra, args[3], options)
         exit 0 unless options[:in_dashboard]
         return if options[:in_dashboard]
       when 'connect', 'setup', 'init', 'install'
@@ -4067,8 +4067,56 @@ def self.handle_skills_command(subcommand, options)
       puts
     end
 
-    def self.handle_config_command(subcommand, subvalue, options)
+    def self.handle_config_command(subcommand, subvalue, subextra_or_options = nil, maybe_options = {})
+      if subextra_or_options.is_a?(Hash)
+        options = subextra_or_options
+        subextra = nil
+      else
+        subextra = subextra_or_options
+        options = maybe_options || {}
+      end
       case subcommand
+      when 'set'
+        key = subvalue.to_s.strip
+        val = subextra.to_s.strip
+        if key.empty? || val.empty?
+          if options[:json]
+            puts JSON.pretty_generate({ error: 'Usage: gsc config set <key> <value>' })
+          else
+            puts Color.c("❌ Error: Please specify key and value.", Color::RED)
+            puts "Example: gsc config set opr_api_key opr_live_xxxx"
+            puts "Example: gsc config set pagespeed_api_key AIzaSyxxxx"
+          end
+          exit 1
+        end
+
+        Config.set(key, val)
+        if key == 'opr_api_key'
+          Config.set('openpagerank_api_key', val)
+        elsif key == 'openpagerank_api_key'
+          Config.set('opr_api_key', val)
+        end
+
+        masked = val.length > 8 ? "#{val[0..7]}...#{val[-4..-1]}" : "***"
+        if options[:json]
+          puts JSON.pretty_generate({ status: 'ok', key: key, value: masked, configFile: Config::CONFIG_FILE })
+        else
+          puts BANNER
+          puts Color.c("✅ Saved configuration: #{Color.c(key, Color::CYAN)} = #{Color.c(masked, Color::GREEN)}", Color::GREEN, Color::BOLD)
+          puts Color.c("   📁 Stored in #{Config::CONFIG_FILE}", Color::GRAY)
+        end
+        return
+
+      when 'get'
+        key = subvalue.to_s.strip
+        val = Config.get(key)
+        if options[:json]
+          puts JSON.pretty_generate({ key: key, value: val })
+        else
+          puts val || "(not set)"
+        end
+        return
+
       when 'set-domain', 'domain'
         if subvalue.nil? || subvalue.empty?
           if options[:json]
@@ -4174,7 +4222,28 @@ def self.handle_skills_command(subcommand, options)
         else
           puts "   Key Location:    #{Color.c('Not found', Color::RED)}"
         end
-        puts "\n   #{Color::BOLD}Linked GA4 Properties per Domain:#{Color::RESET}"
+        opr = cfg['opr_api_key'] || cfg['openpagerank_api_key']
+        if opr
+          m_opr = opr.length > 8 ? "#{opr[0..7]}...#{opr[-4..-1]}" : "***"
+          puts "   OpenPageRank:    #{Color.c(m_opr, Color::GREEN)} (Active)"
+        else
+          puts "   OpenPageRank:    #{Color.c('(not set - run: gsc config set opr_api_key <key>)', Color::GRAY)}"
+        end
+
+        ps = cfg['pagespeed_api_key']
+        if ps
+          m_ps = ps.length > 8 ? "#{ps[0..7]}...#{ps[-4..-1]}" : "***"
+          puts "   PageSpeed API:   #{Color.c(m_ps, Color::GREEN)} (Active)"
+        end
+
+        ke = cfg['keywords_everywhere_api_key']
+        if ke
+          m_ke = ke.length > 8 ? "#{ke[0..7]}...#{ke[-4..-1]}" : "***"
+          puts "   Keywords Evr:    #{Color.c(m_ke, Color::GREEN)} (Active)"
+        end
+
+        puts "
+   #{Color::BOLD}Linked GA4 Properties per Domain:#{Color::RESET}"
         ga4_props = cfg['ga4_properties'] || {}
         if ga4_props.empty?
           puts "      #{Color.c('(None linked yet. Use: gsc config set-ga4 <id> -d <domain>)', Color::GRAY)}"
@@ -4188,6 +4257,8 @@ def self.handle_skills_command(subcommand, options)
         puts "#{Color::BOLD}Configuration shortcuts:#{Color::RESET}"
         puts "   gsc connect                  Interactive setup wizard (drag & drop key)"
         puts "   gsc use <domain>             Set active default domain"
+        puts "   gsc config set <key> <val>   Set API key (e.g. opr_api_key, pagespeed_api_key)"
+        puts "   gsc config get <key>         Read a stored configuration value"
         puts "   gsc config set-ga4 <id>      Link a GA4 Property ID to domain"
         puts "   gsc open                     Open config directory in Finder"
         puts "   gsc where                    Show install path and paths summary"

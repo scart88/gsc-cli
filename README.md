@@ -19,8 +19,8 @@
 
 <p align="center">
   <sub>Explore other software built by our team:</sub><br>
-  ⚡ <a href="https://superspeedapp.com/?utm_source=github&utm_medium=readme&utm_campaign=gsc-cli"><b>Superspeed</b></a> — Lightning-fast macOS disk cleaner & RAM booster for Apple Silicon<br>
-  🛒 <a href="https://supercartapp.com/?utm_source=github&utm_medium=readme&utm_campaign=gsc-cli"><b>Supercart</b></a> — High-converting slide cart drawer & 1-click upsells for Shopify stores<br>
+  ⚡ <a href="https://superspeedapp.com/?utm_source=github&utm_medium=readme&utm_campaign=gsc-cli"><b>Superspeed</b></a> — Built for Shopify speed, CRO & revenue leak intelligence app (5.0 ★)<br>
+  🛒 <a href="https://supercartapp.com/?utm_source=github&utm_medium=readme&utm_campaign=gsc-cli"><b>Supercart</b></a> — Built for Shopify slide cart drawer, in-house shipping protection & upsells (5.0 ★)<br>
   📦 <a href="https://packinglog.com/?utm_source=github&utm_medium=readme&utm_campaign=gsc-cli"><b>PackingLog</b></a> — Smart QR-code box inventory & photo catalog for residential & office moves
 </p>
 
@@ -36,7 +36,7 @@ Every software company, indie hacker, and e-commerce founder faces the exact sam
 4. **AI Agents Need Clean, Fast, Machine-Readable Intelligence**: Modern AI coding agents (Google Antigravity, Claude Code, Cursor, Codex) cannot click web buttons. They need raw, fast, deterministic JSON over stdout.
 
 ### The Epiphany Bridge
-At **[ApollosWave](https://apolloswave.com/?utm_source=github&utm_medium=readme&utm_campaign=gsc-cli)**, we run multiple production software businesses—from macOS system utilities (**[Superspeed](https://superspeedapp.com/?utm_source=github&utm_medium=readme&utm_campaign=gsc-cli)**) and Shopify e-commerce apps (**[Supercart](https://supercartapp.com/?utm_source=github&utm_medium=readme&utm_campaign=gsc-cli)**) to physical moving inventory SaaS (**[PackingLog](https://packinglog.com/?utm_source=github&utm_medium=readme&utm_campaign=gsc-cli)**).
+At **[ApollosWave](https://apolloswave.com/?utm_source=github&utm_medium=readme&utm_campaign=gsc-cli)**, we run multiple production software businesses—from Shopify revenue & speed intelligence (**[Superspeed](https://superspeedapp.com/?utm_source=github&utm_medium=readme&utm_campaign=gsc-cli)**) and e-commerce upsell apps (**[Supercart](https://supercartapp.com/?utm_source=github&utm_medium=readme&utm_campaign=gsc-cli)**) to physical moving inventory SaaS (**[PackingLog](https://packinglog.com/?utm_source=github&utm_medium=readme&utm_campaign=gsc-cli)**).
 
 We refused to bloat our repos with 40 gems or waste 10 hours a week clicking in Search Console. We needed a **single, standalone pure-Ruby CLI** that connects directly to Google APIs using native `OpenSSL` and `Net::HTTP` in **under 50 milliseconds**.
 
@@ -467,8 +467,8 @@ gsc skills install
 
 We build tools for high-performance software, e-commerce, and everyday logistics. Check out our commercial products:
 
-- ⚡ **[Superspeed](https://superspeedapp.com/?utm_source=github&utm_medium=readme&utm_campaign=gsc-cli)** — The native, lightning-fast macOS performance & storage cleaner designed for Apple Silicon. Purge multi-gigabyte Xcode caches, app leftovers, and reclaim RAM in one tap.
-- 🛒 **[Supercart](https://supercartapp.com/?utm_source=github&utm_medium=readme&utm_campaign=gsc-cli)** — The modern slide cart drawer for Shopify. Boost Average Order Value (AOV) with automated in-cart upsells, free shipping progress bars, and instant 1-click checkout.
+- ⚡ **[Superspeed](https://superspeedapp.com/?utm_source=github&utm_medium=readme&utm_campaign=gsc-cli)** — Official **Built for Shopify** speed, CRO & revenue leak intelligence app (5.0 ★). Detect ghost checkouts, rage clicks, and latency bottlenecks, then automatically optimize Core Web Vitals to reclaim lost sales.
+- 🛒 **[Supercart](https://supercartapp.com/?utm_source=github&utm_medium=readme&utm_campaign=gsc-cli)** — Official **Built for Shopify** slide cart drawer (5.0 ★). Lift AOV with a sub-10ms reactive drawer, 1-click in-cart upsells, multi-tier rewards, and self-funded shipping protection with 0% GMV commission.
 - 📦 **[PackingLog](https://packinglog.com/?utm_source=github&utm_medium=readme&utm_campaign=gsc-cli)** — The personal and business moving box inventory management app. Batch-photograph box items with your phone, print scannable QR stickers, and locate any item in seconds.
 
 ---
